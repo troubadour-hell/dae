@@ -87,6 +87,8 @@ func L4ProtoParserFactory(callback func(f *config_parser.Function, l4protoType c
 				l4protoType |= consts.L4ProtoType_TCP
 			case "udp":
 				l4protoType |= consts.L4ProtoType_UDP
+			case "utp":
+				l4protoType |= consts.L4ProtoType_uTP
 			}
 		}
 		return callback(f, l4protoType, overrideOutbound)

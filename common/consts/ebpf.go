@@ -122,17 +122,18 @@ func init() {
 type L4ProtoType uint8
 
 const (
-	L4ProtoType_TCP L4ProtoType = 1
-	L4ProtoType_UDP L4ProtoType = 2
-	L4ProtoType_X   L4ProtoType = 3
+	L4ProtoType_TCP L4ProtoType = 0b001
+	L4ProtoType_UDP L4ProtoType = 0b010
+	L4ProtoType_uTP L4ProtoType = 0b100
+	L4ProtoType_X   L4ProtoType = 0b111
 )
 
 type IpVersionType uint8
 
 const (
-	IpVersion_4 IpVersionType = 1
-	IpVersion_6 IpVersionType = 2
-	IpVersion_X IpVersionType = 3
+	IpVersion_4 IpVersionType = 0b01
+	IpVersion_6 IpVersionType = 0b10
+	IpVersion_X IpVersionType = 0b11
 )
 
 func (v IpVersionType) ToIpVersionStr() IpVersionStr {
