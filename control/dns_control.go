@@ -59,6 +59,7 @@ type DnsControllerOption struct {
 	TimeoutExceedCallback func(dialArgument *dialArgument, err error)
 	IpVersionPrefer       int
 	FixedDomainTtl        map[string]int
+	AllowCacheForResponse bool
 }
 
 type DnsController struct {
@@ -67,11 +68,12 @@ type DnsController struct {
 	routing     *dns.Dns
 	qtypePrefer uint16
 
-	log                 *logrus.Logger
-	cacheAccessCallback func(cache *DnsCache) (err error)
-	cacheRemoveCallback func(cache *DnsCache) (err error)
-	newCache            func(fqdn string, answers []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error)
-	bestDialerChooser   func(req *udpRequest, upstream *dns.Upstream) (*dialArgument, error)
+	log                   *logrus.Logger
+	allowCacheForResponse bool
+	cacheAccessCallback   func(cache *DnsCache) (err error)
+	cacheRemoveCallback   func(cache *DnsCache) (err error)
+	newCache              func(fqdn string, answers []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error)
+	bestDialerChooser     func(req *udpRequest, upstream *dns.Upstream) (*dialArgument, error)
 	// timeoutExceedCallback is used to report this dialer is broken for the NetworkType
 	timeoutExceedCallback func(dialArgument *dialArgument, err error)
 
@@ -113,6 +115,7 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		qtypePrefer: prefer,
 
 		log:                   option.Log,
+		allowCacheForResponse: option.AllowCacheForResponse,
 		cacheAccessCallback:   option.CacheAccessCallback,
 		cacheRemoveCallback:   option.CacheRemoveCallback,
 		newCache:              option.NewCache,
@@ -219,11 +222,13 @@ func (c *DnsController) NormalizeAndCacheDnsResp_(msg *dnsmessage.Msg) (err erro
 		return nil
 	}
 
-	// Set ttl.
-	for i := range msg.Answer {
-		// Set TTL = zero. This requests applications must resend every request.
-		// However, it may be not defined in the standard.
-		msg.Answer[i].Header().Ttl = 0
+	if c.allowCacheForResponse {
+		// Set ttl.
+		for i := range msg.Answer {
+			// Set TTL = zero. This requests applications must resend every request.
+			// However, it may be not defined in the standard.
+			msg.Answer[i].Header().Ttl = 0
+		}
 	}
 
 	// Check if request A/AAAA record.
@@ -471,20 +476,22 @@ func (c *DnsController) handle_(
 		}
 	}()
 
-	if resp := c.LookupDnsRespCache_(dnsMessage, cacheKey, false); resp != nil {
-		// Send cache to client directly.
-		if needResp {
-			if err = sendPkt(c.log, resp, req.realDst, req.realSrc, req.src, req.lConn); err != nil {
-				return fmt.Errorf("failed to write cached DNS resp: %w", err)
+	if c.allowCacheForResponse {
+		if resp := c.LookupDnsRespCache_(dnsMessage, cacheKey, false); resp != nil {
+			// Send cache to client directly.
+			if needResp {
+				if err = sendPkt(c.log, resp, req.realDst, req.realSrc, req.src, req.lConn); err != nil {
+					return fmt.Errorf("failed to write cached DNS resp: %w", err)
+				}
 			}
+			if c.log.IsLevelEnabled(logrus.DebugLevel) && len(dnsMessage.Question) > 0 {
+				q := dnsMessage.Question[0]
+				c.log.Debugf("UDP(DNS) %v <-> Cache: %v %v",
+					RefineSourceToShow(req.realSrc, req.realDst.Addr()), strings.ToLower(q.Name), QtypeToString(q.Qtype),
+				)
+			}
+			return nil
 		}
-		if c.log.IsLevelEnabled(logrus.DebugLevel) && len(dnsMessage.Question) > 0 {
-			q := dnsMessage.Question[0]
-			c.log.Debugf("UDP(DNS) %v <-> Cache: %v %v",
-				RefineSourceToShow(req.realSrc, req.realDst.Addr()), strings.ToLower(q.Name), QtypeToString(q.Qtype),
-			)
-		}
-		return nil
 	}
 
 	if c.log.IsLevelEnabled(logrus.TraceLevel) {

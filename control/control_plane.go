@@ -459,8 +459,9 @@ func NewControlPlane(
 				IsDns:     true,
 			}, err)
 		},
-		IpVersionPrefer: dnsConfig.IpVersionPrefer,
-		FixedDomainTtl:  fixedDomainTtl,
+		IpVersionPrefer:       dnsConfig.IpVersionPrefer,
+		FixedDomainTtl:        fixedDomainTtl,
+		AllowCacheForResponse: dialMode != consts.DialMode_Ip,
 	}); err != nil {
 		return nil, err
 	}
