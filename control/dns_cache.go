@@ -29,6 +29,10 @@ func (c *DnsCache) FillInto(mac [6]uint8, req *dnsmessage.Msg) {
 	req.RecursionAvailable = true
 	req.Truncated = false
 	answerAndDeadline, ok := c.AnswerPerMac[mac]
+	if !ok {
+		// Tries fake mac.
+		answerAndDeadline, ok = c.AnswerPerMac[[6]uint8{}]
+	}
 	if ok {
 		req.Answer = deepcopy.Copy(answerAndDeadline.Answer).([]dnsmessage.RR)
 		req.Rcode = dnsmessage.RcodeSuccess
