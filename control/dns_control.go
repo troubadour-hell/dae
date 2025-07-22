@@ -173,8 +173,7 @@ func (c *DnsController) LookupDnsRespCache(cacheKey string, ignoreFixedTtl bool)
 // LookupDnsRespCache_ will modify the msg in place.
 func (c *DnsController) LookupDnsRespCache_(mac [6]uint8, msg *dnsmessage.Msg, cacheKey string, ignoreFixedTtl bool) (resp []byte) {
 	cache := c.LookupDnsRespCache(cacheKey, ignoreFixedTtl)
-	if cache != nil {
-		cache.FillInto(mac, msg)
+	if cache != nil && cache.FillInto(mac, msg) {
 		msg.Compress = true
 		b, err := msg.Pack()
 		if err != nil {
