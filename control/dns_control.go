@@ -287,6 +287,10 @@ func (c *DnsController) __updateDnsCacheDeadline(mac [6]uint8, host string, dnsT
 	if _, err = netip.ParseAddr(host); err == nil {
 		return nil
 	}
+	// Ignores for empty answer.
+	if len(answers) == 0 {
+		return nil
+	}
 
 	now := time.Now()
 	deadline, originalDeadline := deadlineFunc(now, host)
