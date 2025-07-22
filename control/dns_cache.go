@@ -13,37 +13,48 @@ import (
 	"github.com/mohae/deepcopy"
 )
 
-type DnsCache struct {
-	DomainBitmap     []uint32
+type AnswerAndDeadline struct {
 	Answer           []dnsmessage.RR
 	Deadline         time.Time
 	OriginalDeadline time.Time // This field is not impacted by `fixed_domain_ttl`.
 }
 
-func (c *DnsCache) FillInto(req *dnsmessage.Msg) {
-	req.Answer = deepcopy.Copy(c.Answer).([]dnsmessage.RR)
-	req.Rcode = dnsmessage.RcodeSuccess
+type DnsCache struct {
+	DomainBitmap []uint32
+	AnswerPerMac map[[6]uint8]AnswerAndDeadline
+}
+
+func (c *DnsCache) FillInto(mac [6]uint8, req *dnsmessage.Msg) {
 	req.Response = true
 	req.RecursionAvailable = true
 	req.Truncated = false
+	answerAndDeadline, ok := c.AnswerPerMac[mac]
+	if ok {
+		req.Answer = deepcopy.Copy(answerAndDeadline.Answer).([]dnsmessage.RR)
+		req.Rcode = dnsmessage.RcodeSuccess
+	} else {
+		req.Rcode = dnsmessage.RcodeNameError
+	}
 }
 
 func (c *DnsCache) IncludeIp(ip netip.Addr) bool {
-	for _, ans := range c.Answer {
-		switch body := ans.(type) {
-		case *dnsmessage.A:
-			if !ip.Is4() {
-				continue
-			}
-			if a, ok := netip.AddrFromSlice(body.A); ok && a == ip {
-				return true
-			}
-		case *dnsmessage.AAAA:
-			if !ip.Is6() {
-				continue
-			}
-			if a, ok := netip.AddrFromSlice(body.AAAA); ok && a == ip {
-				return true
+	for _, answerAndDeadLine := range c.AnswerPerMac {
+		for _, ans := range answerAndDeadLine.Answer {
+			switch body := ans.(type) {
+			case *dnsmessage.A:
+				if !ip.Is4() {
+					continue
+				}
+				if a, ok := netip.AddrFromSlice(body.A); ok && a == ip {
+					return true
+				}
+			case *dnsmessage.AAAA:
+				if !ip.Is6() {
+					continue
+				}
+				if a, ok := netip.AddrFromSlice(body.AAAA); ok && a == ip {
+					return true
+				}
 			}
 		}
 	}
@@ -51,10 +62,12 @@ func (c *DnsCache) IncludeIp(ip netip.Addr) bool {
 }
 
 func (c *DnsCache) IncludeAnyIp() bool {
-	for _, ans := range c.Answer {
-		switch ans.(type) {
-		case *dnsmessage.A, *dnsmessage.AAAA:
-			return true
+	for _, answerAndDeadLine := range c.AnswerPerMac {
+		for _, ans := range answerAndDeadLine.Answer {
+			switch ans.(type) {
+			case *dnsmessage.A, *dnsmessage.AAAA:
+				return true
+			}
 		}
 	}
 	return false

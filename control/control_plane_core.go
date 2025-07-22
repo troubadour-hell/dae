@@ -632,22 +632,24 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 // be invoked every A/AAAA-record lookup.
 func (c *controlPlaneCore) BatchUpdateDomainRouting(cache *DnsCache) error {
 	// Parse ips from DNS resp answers.
-	var ips []netip.Addr
-	for _, ans := range cache.Answer {
-		var (
-			ip netip.Addr
-			ok bool
-		)
-		switch body := ans.(type) {
-		case *dnsmessage.A:
-			ip, ok = netip.AddrFromSlice(body.A)
-		case *dnsmessage.AAAA:
-			ip, ok = netip.AddrFromSlice(body.AAAA)
+	ips := make(map[netip.Addr]struct{})
+	for _, answerAndDeadline := range cache.AnswerPerMac {
+		for _, ans := range answerAndDeadline.Answer {
+			var (
+				ip netip.Addr
+				ok bool
+			)
+			switch body := ans.(type) {
+			case *dnsmessage.A:
+				ip, ok = netip.AddrFromSlice(body.A)
+			case *dnsmessage.AAAA:
+				ip, ok = netip.AddrFromSlice(body.AAAA)
+			}
+			if !ok || ip.IsUnspecified() {
+				continue
+			}
+			ips[ip] = struct{}{}
 		}
-		if !ok || ip.IsUnspecified() {
-			continue
-		}
-		ips = append(ips, ip)
 	}
 	if len(ips) == 0 {
 		return nil
@@ -657,7 +659,7 @@ func (c *controlPlaneCore) BatchUpdateDomainRouting(cache *DnsCache) error {
 	// Construct keys and vals, and BpfMapBatchUpdate.
 	var keys [][4]uint32
 	var vals []bpfDomainRouting
-	for _, ip := range ips {
+	for ip, _ := range ips {
 		ip6 := ip.As16()
 		keys = append(keys, common.Ipv6ByteSliceToUint32Array(ip6[:]))
 		r := bpfDomainRouting{}
@@ -678,22 +680,24 @@ func (c *controlPlaneCore) BatchUpdateDomainRouting(cache *DnsCache) error {
 // BatchRemoveDomainRouting remove bpf map domain_routing.
 func (c *controlPlaneCore) BatchRemoveDomainRouting(cache *DnsCache) error {
 	// Parse ips from DNS resp answers.
-	var ips []netip.Addr
-	for _, ans := range cache.Answer {
-		var (
-			ip netip.Addr
-			ok bool
-		)
-		switch body := ans.(type) {
-		case *dnsmessage.A:
-			ip, ok = netip.AddrFromSlice(body.A)
-		case *dnsmessage.AAAA:
-			ip, ok = netip.AddrFromSlice(body.AAAA)
+	ips := make(map[netip.Addr]struct{})
+	for _, answerAndDeadline := range cache.AnswerPerMac {
+		for _, ans := range answerAndDeadline.Answer {
+			var (
+				ip netip.Addr
+				ok bool
+			)
+			switch body := ans.(type) {
+			case *dnsmessage.A:
+				ip, ok = netip.AddrFromSlice(body.A)
+			case *dnsmessage.AAAA:
+				ip, ok = netip.AddrFromSlice(body.AAAA)
+			}
+			if !ok || ip.IsUnspecified() {
+				continue
+			}
+			ips[ip] = struct{}{}
 		}
-		if !ok || ip.IsUnspecified() {
-			continue
-		}
-		ips = append(ips, ip)
 	}
 	if len(ips) == 0 {
 		return nil
@@ -702,7 +706,7 @@ func (c *controlPlaneCore) BatchRemoveDomainRouting(cache *DnsCache) error {
 	// Update bpf map.
 	// Construct keys and vals, and BpfMapBatchUpdate.
 	var keys [][4]uint32
-	for _, ip := range ips {
+	for ip, _ := range ips {
 		ip6 := ip.As16()
 		keys = append(keys, common.Ipv6ByteSliceToUint32Array(ip6[:]))
 	}

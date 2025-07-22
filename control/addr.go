@@ -23,3 +23,7 @@ func RefineSourceToShow(src netip.AddrPort, dst netip.Addr) (srcToShow string) {
 func RefineAddrPortToShow(addrPort netip.AddrPort) (srcToShow string) {
 	return net.JoinHostPort(net.IP(addrPort.Addr().AsSlice()).String(), strconv.Itoa(int(addrPort.Port())))
 }
+
+func RefineMacToShow(mac [6]uint8) (macToShow string) {
+	return net.HardwareAddr(mac[:]).String()
+}

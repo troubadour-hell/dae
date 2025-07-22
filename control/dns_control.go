@@ -54,7 +54,7 @@ type DnsControllerOption struct {
 	Log                   *logrus.Logger
 	CacheAccessCallback   func(cache *DnsCache) (err error)
 	CacheRemoveCallback   func(cache *DnsCache) (err error)
-	NewCache              func(fqdn string, answers []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error)
+	NewCache              func(mac [6]uint8, fqdn string, answers []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error)
 	BestDialerChooser     func(req *udpRequest, upstream *dns.Upstream) (*dialArgument, error)
 	TimeoutExceedCallback func(dialArgument *dialArgument, err error)
 	IpVersionPrefer       int
@@ -70,7 +70,7 @@ type DnsController struct {
 	log                 *logrus.Logger
 	cacheAccessCallback func(cache *DnsCache) (err error)
 	cacheRemoveCallback func(cache *DnsCache) (err error)
-	newCache            func(fqdn string, answers []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error)
+	newCache            func(mac [6]uint8, fqdn string, answers []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error)
 	bestDialerChooser   func(req *udpRequest, upstream *dns.Upstream) (*dialArgument, error)
 	// timeoutExceedCallback is used to report this dialer is broken for the NetworkType
 	timeoutExceedCallback func(dialArgument *dialArgument, err error)
@@ -147,15 +147,20 @@ func (c *DnsController) LookupDnsRespCache(cacheKey string, ignoreFixedTtl bool)
 	if !ok {
 		return nil
 	}
-	var deadline time.Time
-	if !ignoreFixedTtl {
-		deadline = cache.Deadline
-	} else {
-		deadline = cache.OriginalDeadline
+	now := time.Now()
+	finalDeadline := now
+	for _, answerAndDeadline := range cache.AnswerPerMac {
+		deadline := answerAndDeadline.Deadline
+		if ignoreFixedTtl {
+			deadline = answerAndDeadline.OriginalDeadline
+		}
+		if deadline.After(finalDeadline) {
+			finalDeadline = deadline
+		}
 	}
 	// We should make sure the cache did not expire, or
 	// return nil and request a new lookup to refresh the cache.
-	if !deadline.After(time.Now()) {
+	if !finalDeadline.After(now) {
 		return nil
 	}
 	if err := c.cacheAccessCallback(cache); err != nil {
@@ -166,10 +171,10 @@ func (c *DnsController) LookupDnsRespCache(cacheKey string, ignoreFixedTtl bool)
 }
 
 // LookupDnsRespCache_ will modify the msg in place.
-func (c *DnsController) LookupDnsRespCache_(msg *dnsmessage.Msg, cacheKey string, ignoreFixedTtl bool) (resp []byte) {
+func (c *DnsController) LookupDnsRespCache_(mac [6]uint8, msg *dnsmessage.Msg, cacheKey string, ignoreFixedTtl bool) (resp []byte) {
 	cache := c.LookupDnsRespCache(cacheKey, ignoreFixedTtl)
 	if cache != nil {
-		cache.FillInto(msg)
+		cache.FillInto(mac, msg)
 		msg.Compress = true
 		b, err := msg.Pack()
 		if err != nil {
@@ -182,7 +187,7 @@ func (c *DnsController) LookupDnsRespCache_(msg *dnsmessage.Msg, cacheKey string
 }
 
 // NormalizeAndCacheDnsResp_ handle DNS resp in place.
-func (c *DnsController) NormalizeAndCacheDnsResp_(msg *dnsmessage.Msg) (err error) {
+func (c *DnsController) NormalizeAndCacheDnsResp_(mac [6]uint8, msg *dnsmessage.Msg) (err error) {
 	// Check healthy resp.
 	if !msg.Response || len(msg.Question) == 0 {
 		return nil
@@ -213,7 +218,7 @@ func (c *DnsController) NormalizeAndCacheDnsResp_(msg *dnsmessage.Msg) (err erro
 	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
 	default:
 		// Update DnsCache.
-		if err = c.updateDnsCache(msg, ttl, &q); err != nil {
+		if err = c.updateDnsCache(mac, msg, ttl, &q); err != nil {
 			return err
 		}
 		return nil
@@ -238,21 +243,21 @@ loop:
 	}
 	if !reqIpRecord {
 		// Update DnsCache.
-		if err = c.updateDnsCache(msg, ttl, &q); err != nil {
+		if err = c.updateDnsCache(mac, msg, ttl, &q); err != nil {
 			return err
 		}
 		return nil
 	}
 
 	// Update DnsCache.
-	if err = c.updateDnsCache(msg, ttl, &q); err != nil {
+	if err = c.updateDnsCache(mac, msg, ttl, &q); err != nil {
 		return err
 	}
 	// Pack to get newData.
 	return nil
 }
 
-func (c *DnsController) updateDnsCache(msg *dnsmessage.Msg, ttl uint32, q *dnsmessage.Question) error {
+func (c *DnsController) updateDnsCache(mac [6]uint8, msg *dnsmessage.Msg, ttl uint32, q *dnsmessage.Question) error {
 	// Update DnsCache.
 	if c.log.IsLevelEnabled(logrus.TraceLevel) {
 		c.log.WithFields(logrus.Fields{
@@ -262,7 +267,7 @@ func (c *DnsController) updateDnsCache(msg *dnsmessage.Msg, ttl uint32, q *dnsme
 		}).Tracef("Update DNS record cache")
 	}
 
-	if err := c.UpdateDnsCacheTtl(q.Name, q.Qtype, msg.Answer, int(ttl)); err != nil {
+	if err := c.UpdateDnsCacheTtl(mac, q.Name, q.Qtype, msg.Answer, int(ttl)); err != nil {
 		return err
 	}
 	return nil
@@ -270,7 +275,7 @@ func (c *DnsController) updateDnsCache(msg *dnsmessage.Msg, ttl uint32, q *dnsme
 
 type daedlineFunc func(now time.Time, host string) (deadline time.Time, originalDeadline time.Time)
 
-func (c *DnsController) __updateDnsCacheDeadline(host string, dnsTyp uint16, answers []dnsmessage.RR, deadlineFunc daedlineFunc) (err error) {
+func (c *DnsController) __updateDnsCacheDeadline(mac [6]uint8, host string, dnsTyp uint16, answers []dnsmessage.RR, deadlineFunc daedlineFunc) (err error) {
 	var fqdn string
 	if strings.HasSuffix(host, ".") {
 		fqdn = strings.ToLower(host)
@@ -290,12 +295,14 @@ func (c *DnsController) __updateDnsCacheDeadline(host string, dnsTyp uint16, ans
 	c.dnsCacheMu.Lock()
 	cache, ok := c.dnsCache[cacheKey]
 	if ok {
-		cache.Answer = answers
-		cache.Deadline = deadline
-		cache.OriginalDeadline = originalDeadline
+		cache.AnswerPerMac[mac] = AnswerAndDeadline{
+			Answer:           answers,
+			Deadline:         deadline,
+			OriginalDeadline: originalDeadline,
+		}
 		c.dnsCacheMu.Unlock()
 	} else {
-		cache, err = c.newCache(fqdn, answers, deadline, originalDeadline)
+		cache, err = c.newCache(mac, fqdn, answers, deadline, originalDeadline)
 		if err != nil {
 			c.dnsCacheMu.Unlock()
 			return err
@@ -310,8 +317,8 @@ func (c *DnsController) __updateDnsCacheDeadline(host string, dnsTyp uint16, ans
 	return nil
 }
 
-func (c *DnsController) UpdateDnsCacheDeadline(host string, dnsTyp uint16, answers []dnsmessage.RR, deadline time.Time) (err error) {
-	return c.__updateDnsCacheDeadline(host, dnsTyp, answers, func(now time.Time, host string) (daedline time.Time, originalDeadline time.Time) {
+func (c *DnsController) UpdateDnsCacheDeadline(mac [6]uint8, host string, dnsTyp uint16, answers []dnsmessage.RR, deadline time.Time) (err error) {
+	return c.__updateDnsCacheDeadline(mac, host, dnsTyp, answers, func(now time.Time, host string) (daedline time.Time, originalDeadline time.Time) {
 		if fixedTtl, ok := c.fixedDomainTtl[host]; ok {
 			/// NOTICE: Cannot set TTL accurately.
 			if now.Sub(deadline).Seconds() > float64(fixedTtl) {
@@ -323,8 +330,8 @@ func (c *DnsController) UpdateDnsCacheDeadline(host string, dnsTyp uint16, answe
 	})
 }
 
-func (c *DnsController) UpdateDnsCacheTtl(host string, dnsTyp uint16, answers []dnsmessage.RR, ttl int) (err error) {
-	return c.__updateDnsCacheDeadline(host, dnsTyp, answers, func(now time.Time, host string) (daedline time.Time, originalDeadline time.Time) {
+func (c *DnsController) UpdateDnsCacheTtl(mac [6]uint8, host string, dnsTyp uint16, answers []dnsmessage.RR, ttl int) (err error) {
+	return c.__updateDnsCacheDeadline(mac, host, dnsTyp, answers, func(now time.Time, host string) (daedline time.Time, originalDeadline time.Time) {
 		originalDeadline = now.Add(time.Duration(ttl) * time.Second)
 		if fixedTtl, ok := c.fixedDomainTtl[host]; ok {
 			return now.Add(time.Duration(fixedTtl) * time.Second), originalDeadline
@@ -413,7 +420,7 @@ func (c *DnsController) Handle_(dnsMessage *dnsmessage.Msg, req *udpRequest) (er
 	}
 
 	// Join results and consider whether to response.
-	resp := c.LookupDnsRespCache_(dnsMessage, c.cacheKey(qname, qtype), true)
+	resp := c.LookupDnsRespCache_(req.routingResult.Mac, dnsMessage, c.cacheKey(qname, qtype), true)
 	if resp == nil {
 		// resp is not valid.
 		c.log.WithFields(logrus.Fields{
@@ -471,7 +478,7 @@ func (c *DnsController) handle_(
 		}
 	}()
 
-	if resp := c.LookupDnsRespCache_(dnsMessage, cacheKey, false); resp != nil {
+	if resp := c.LookupDnsRespCache_(req.routingResult.Mac, dnsMessage, cacheKey, false); resp != nil {
 		// Send cache to client directly.
 		if needResp {
 			if err = sendPkt(c.log, resp, req.realDst, req.realSrc, req.src, req.lConn); err != nil {
@@ -480,8 +487,10 @@ func (c *DnsController) handle_(
 		}
 		if c.log.IsLevelEnabled(logrus.DebugLevel) && len(dnsMessage.Question) > 0 {
 			q := dnsMessage.Question[0]
-			c.log.Debugf("UDP(DNS) %v <-> Cache: %v %v",
-				RefineSourceToShow(req.realSrc, req.realDst.Addr()), strings.ToLower(q.Name), QtypeToString(q.Qtype),
+			c.log.Debugf("UDP(DNS) %v <-> Cache(%v): %v %v",
+				RefineSourceToShow(req.realSrc, req.realDst.Addr()),
+				RefineMacToShow(req.routingResult.Mac),
+				strings.ToLower(q.Name), QtypeToString(q.Qtype),
 			)
 		}
 		return nil
@@ -674,7 +683,7 @@ func (c *DnsController) dialSend(invokingDepth int, req *udpRequest, data []byte
 			return fmt.Errorf("unknown upstream: %v", upstreamIndex.String())
 		}
 	}
-	if err = c.NormalizeAndCacheDnsResp_(respMsg); err != nil {
+	if err = c.NormalizeAndCacheDnsResp_(req.routingResult.Mac, respMsg); err != nil {
 		return err
 	}
 	if needResp {

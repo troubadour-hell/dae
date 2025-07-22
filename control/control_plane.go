@@ -443,12 +443,15 @@ func NewControlPlane(
 			}
 			return nil
 		},
-		NewCache: func(fqdn string, answers []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error) {
-			return &DnsCache{
-				DomainBitmap:     plane.routingMatcher.domainMatcher.MatchDomainBitmap(fqdn),
+		NewCache: func(mac [6]uint8, fqdn string, answers []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error) {
+			answerPerMac := map[[6]uint8]AnswerAndDeadline{mac: AnswerAndDeadline{
 				Answer:           answers,
 				Deadline:         deadline,
 				OriginalDeadline: originalDeadline,
+			}}
+			return &DnsCache{
+				DomainBitmap: plane.routingMatcher.domainMatcher.MatchDomainBitmap(fqdn),
+				AnswerPerMac: answerPerMac,
 			}, nil
 		},
 		BestDialerChooser: plane.chooseBestDnsDialer,
@@ -467,25 +470,7 @@ func NewControlPlane(
 	// Refresh domain routing cache with new routing.
 	// FIXME: We temperarily disable it because we want to make change of DNS section take effects immediately.
 	// TODO: Add change detection.
-	if false && len(dnsCache) > 0 {
-		for cacheKey, cache := range dnsCache {
-			// Also refresh out-dated routing because kernel map items have no expiration.
-			lastDot := strings.LastIndex(cacheKey, ".")
-			if lastDot == -1 || lastDot == len(cacheKey)-1 {
-				// Not a valid key.
-				log.Warnln("Invalid cache key:", cacheKey)
-				continue
-			}
-			host := cacheKey[:lastDot]
-			_typ := cacheKey[lastDot+1:]
-			typ, err := strconv.ParseUint(_typ, 10, 16)
-			if err != nil {
-				// Unexpected.
-				return nil, err
-			}
-			_ = plane.dnsController.UpdateDnsCacheDeadline(host, uint16(typ), cache.Answer, cache.Deadline)
-		}
-	} else if _bpf != nil {
+	if _bpf != nil {
 		// Is reloading, and dnsCache == nil.
 		// Remove all map items.
 		// Normally, it is due to the change of ip version preference.
@@ -589,6 +574,7 @@ func (c *ControlPlane) dnsUpstreamReadyCallback(dnsUpstream *dns.Upstream) (err 
 	// Ten years later.
 	deadline := time.Now().Add(time.Hour * 24 * 365 * 10)
 	fqdn := dnsmessage.CanonicalName(dnsUpstream.Hostname)
+	fakeMac := [6]uint8{}
 
 	if dnsUpstream.Ip4.IsValid() {
 		typ := dnsmessage.TypeA
@@ -601,7 +587,7 @@ func (c *ControlPlane) dnsUpstreamReadyCallback(dnsUpstream *dns.Upstream) (err 
 			},
 			A: dnsUpstream.Ip4.AsSlice(),
 		}}
-		if err = c.dnsController.UpdateDnsCacheDeadline(dnsUpstream.Hostname, typ, answers, deadline); err != nil {
+		if err = c.dnsController.UpdateDnsCacheDeadline(fakeMac, dnsUpstream.Hostname, typ, answers, deadline); err != nil {
 			return err
 		}
 	}
@@ -617,7 +603,7 @@ func (c *ControlPlane) dnsUpstreamReadyCallback(dnsUpstream *dns.Upstream) (err 
 			},
 			AAAA: dnsUpstream.Ip6.AsSlice(),
 		}}
-		if err = c.dnsController.UpdateDnsCacheDeadline(dnsUpstream.Hostname, typ, answers, deadline); err != nil {
+		if err = c.dnsController.UpdateDnsCacheDeadline(fakeMac, dnsUpstream.Hostname, typ, answers, deadline); err != nil {
 			return err
 		}
 	}
