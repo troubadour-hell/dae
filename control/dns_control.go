@@ -126,15 +126,24 @@ func (c *DnsController) cacheKey(qname string, qtype uint16) string {
 	return dnsmessage.CanonicalName(qname) + strconv.Itoa(int(qtype))
 }
 
-func (c *DnsController) FillCacheMsg(msg *dnsmessage.Msg, cache DnsCacheEntry) {
+func (c *DnsController) FillCacheMsg(msg *dnsmessage.Msg, cache DnsCacheEntry) bool {
 	if cache != nil {
-		cache.FillInto(msg)
 		// TODO: 允许关闭这部分逻辑
-		ttl := uint32(time.Until(cache.GetDeadline()).Seconds())
-		for i := range msg.Answer {
-			msg.Answer[i].Header().Ttl = ttl
+		utilSeconds := time.Until(cache.GetDeadline()).Seconds()
+		if utilSeconds > 0 {
+			cache.FillInto(msg)
+			ttl := uint32(utilSeconds)
+			for i := range msg.Answer {
+				msg.Answer[i].Header().Ttl = ttl
+			}
+			return true
+		} else {
+			if log.IsLevelEnabled(log.DebugLevel) && msg.Question != nil && len(msg.Question) > 0 {
+				log.Debugf("Cache(%v) is out of date", msg.Question[0].Name)
+			}
 		}
 	}
+	return false
 }
 
 func (c *DnsController) NormalizeDnsResp(answers []dnsmessage.RR) (ttl int) {
@@ -325,22 +334,21 @@ func (c *DnsController) handleDNSRequest(
 			Ip46:     netutils.FromAddr(req.dst.Addr()),
 		}
 	} else {
-		// Get corresponding upstream.
-		upstream, err = c.routing.GetUpstream(RequestIndex)
-		if err != nil {
-			return err
-		}
-
 		// Lookup Cache
 		// Not Lookup Cache if AsIs
-		if cache := c.dnsCache.Get(cacheKey); cache != nil {
-			c.FillCacheMsg(dnsMessage, cache)
+		if cache := c.dnsCache.Get(cacheKey); c.FillCacheMsg(dnsMessage, cache) {
 			if log.IsLevelEnabled(log.DebugLevel) && len(dnsMessage.Question) > 0 {
 				log.Debugf("UDP(DNS) %v <-> Cache: %v %v",
 					RefineSourceToShow(req.src, req.dst.Addr()), qname, qtype,
 				)
 			}
 			return nil
+		}
+
+		// Get corresponding upstream.
+		upstream, err = c.routing.GetUpstream(RequestIndex)
+		if err != nil {
+			return err
 		}
 	}
 
