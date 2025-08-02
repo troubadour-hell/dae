@@ -54,11 +54,12 @@ var (
 )
 
 type DnsControllerOption struct {
-	NewLookupCache     func(fqdn string, answers []dnsmessage.RR, deadline time.Time) (cache *LookupCache, err error)
-	LookupCacheTimeout func(cache *LookupCache) (err error)
-	BestDialerChooser  func(req *udpRequest, upstream *dns.Upstream) (*dialArgument, error)
-	IpVersionPrefer    int
-	FixedDomainTtl     map[string]int
+	NewLookupCache        func(fqdn string, answers []dnsmessage.RR, deadline time.Time) (cache *LookupCache, err error)
+	LookupCacheTimeout    func(cache *LookupCache) (err error)
+	BestDialerChooser     func(req *udpRequest, upstream *dns.Upstream) (*dialArgument, error)
+	IpVersionPrefer       int
+	FixedDomainTtl        map[string]int
+	AllowCacheForResponse bool
 }
 
 type DnsController struct {
@@ -69,11 +70,12 @@ type DnsController struct {
 	lookupCacheTimeout func(cache *LookupCache) (err error)
 	bestDialerChooser  func(req *udpRequest, upstream *dns.Upstream) (*dialArgument, error)
 
-	fixedDomainTtl    map[string]int
-	lookupKeyLocker   common.KeyLocker[string]
-	dnsCache          *commonDnsCache
-	lookupCache       *commonDnsCache
-	dnsForwarderCache sync.Map // map[dnsForwarderKey]DnsForwarder
+	fixedDomainTtl        map[string]int
+	allowCacheForResponse bool
+	lookupKeyLocker       common.KeyLocker[string]
+	dnsCache              *commonDnsCache
+	lookupCache           *commonDnsCache
+	dnsForwarderCache     sync.Map // map[dnsForwarderKey]DnsForwarder
 }
 
 func parseIpVersionPreference(prefer int) (uint16, error) {
@@ -115,10 +117,11 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		lookupCacheTimeout: option.LookupCacheTimeout,
 		bestDialerChooser:  option.BestDialerChooser,
 
-		fixedDomainTtl:    option.FixedDomainTtl,
-		dnsForwarderCache: sync.Map{},
-		dnsCache:          dnsCache,
-		lookupCache:       lookupCache,
+		fixedDomainTtl:        option.FixedDomainTtl,
+		allowCacheForResponse: option.AllowCacheForResponse,
+		dnsForwarderCache:     sync.Map{},
+		dnsCache:              dnsCache,
+		lookupCache:           lookupCache,
 	}, nil
 }
 
@@ -127,7 +130,7 @@ func (c *DnsController) cacheKey(qname string, qtype uint16) string {
 }
 
 func (c *DnsController) FillCacheMsg(msg *dnsmessage.Msg, cache DnsCacheEntry) bool {
-	if cache != nil {
+	if cache != nil && c.allowCacheForResponse {
 		// TODO: 允许关闭这部分逻辑
 		utilSeconds := time.Until(cache.GetDeadline()).Seconds()
 		if utilSeconds > 0 {
@@ -467,7 +470,7 @@ Dial:
 			}).Tracef("Update DNS record cache")
 		}
 
-		if err := c.UpdateDnsCacheTtl(qname, cacheKey, ans, int(ttl)); err != nil {
+		if err := c.UpdateDnsCacheTtl(qname, cacheKey, ans, ttl); err != nil {
 			return err
 		}
 	}

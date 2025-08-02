@@ -637,23 +637,23 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 	return
 }
 
+func getIP(rr dnsmessage.RR) (ip netip.Addr, ok bool) {
+	switch body := rr.(type) {
+	case *dnsmessage.A:
+		ip, ok = netip.AddrFromSlice(body.A)
+	case *dnsmessage.AAAA:
+		ip, ok = netip.AddrFromSlice(body.AAAA)
+	}
+	return
+}
+
 // Parse ips from DNS resp answers.
 func getIPs(answer []dnsmessage.RR) (ips []netip.Addr) {
 	for _, ans := range answer {
-		var (
-			ip netip.Addr
-			ok bool
-		)
-		switch body := ans.(type) {
-		case *dnsmessage.A:
-			ip, ok = netip.AddrFromSlice(body.A)
-		case *dnsmessage.AAAA:
-			ip, ok = netip.AddrFromSlice(body.AAAA)
+		ip, ok := getIP(ans)
+		if ok && !ip.IsUnspecified() {
+			ips = append(ips, ip)
 		}
-		if !ok || ip.IsUnspecified() {
-			continue
-		}
-		ips = append(ips, ip)
 	}
 	return
 }

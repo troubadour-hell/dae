@@ -426,9 +426,10 @@ func NewControlPlane(
 			}
 			return nil
 		},
-		BestDialerChooser: plane.chooseBestDnsDialer,
-		IpVersionPrefer:   dnsConfig.IpVersionPrefer,
-		FixedDomainTtl:    fixedDomainTtl,
+		BestDialerChooser:     plane.chooseBestDnsDialer,
+		IpVersionPrefer:       dnsConfig.IpVersionPrefer,
+		FixedDomainTtl:        fixedDomainTtl,
+		AllowCacheForResponse: dialMode != consts.DialMode_Ip,
 	}); err != nil {
 		return nil, err
 	}

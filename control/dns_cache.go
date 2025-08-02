@@ -66,15 +66,56 @@ func (c *DnsCache) IncludeAnyIp() bool {
 }
 
 type DnsCacheEntry interface {
-	SetAnswer([]dnsmessage.RR)
+	MergeAnswer([]dnsmessage.RR)
 	SetDeadline(time.Time)
 	GetDeadline() time.Time
 	FillInto(req *dnsmessage.Msg)
 }
 
-func (c *DnsCache) SetAnswer(a []dnsmessage.RR) { c.Answer = a }
-func (c *DnsCache) SetDeadline(t time.Time)     { c.Deadline = t }
-func (c *DnsCache) GetDeadline() time.Time      { return c.Deadline }
+func (c *DnsCache) MergeAnswer(a []dnsmessage.RR) {
+	// Removes the dup & invalid in c.Answer.
+	dupCount := 0
+	for i, ans := range c.Answer {
+		ip1, ok1 := getIP(ans)
+		if !ok1 {
+			c.Answer[i] = nil // Mark as nil to remove later
+			dupCount++
+			continue
+		}
+		for _, newAns := range a {
+			ip2, ok2 := getIP(newAns)
+			if ok2 && ip1 == ip2 {
+				c.Answer[i] = nil // Mark as nil to remove later
+				dupCount++
+				break
+			}
+		}
+	}
+	if dupCount == len(c.Answer) {
+		c.Answer = a
+		return
+	}
+	if dupCount == 0 {
+		c.Answer = append(a, c.Answer...)
+	} else {
+		// Compacts c.Answer.
+		i := 0
+		for _, ans := range c.Answer {
+			if ans != nil {
+				c.Answer[i] = ans
+				i++
+			}
+		}
+		c.Answer = append(a, c.Answer[:i]...)
+	}
+	// Avoids wasting memory.
+	if len(c.Answer) > 30 {
+		c.Answer = c.Answer[:30]
+	}
+}
+
+func (c *DnsCache) SetDeadline(t time.Time) { c.Deadline = t }
+func (c *DnsCache) GetDeadline() time.Time  { return c.Deadline }
 
 var _ DnsCacheEntry = (*DnsCache)(nil)
 var _ DnsCacheEntry = (*LookupCache)(nil)
@@ -151,7 +192,7 @@ func (c *commonDnsCache) UpdateDeadline(fqdn string, cacheKey string, answers []
 
 	if elem, ok := c.cache[cacheKey]; ok {
 		entry := elem.Value.(*lruEntry)
-		entry.value.SetAnswer(answers)
+		entry.value.MergeAnswer(answers)
 		entry.value.SetDeadline(deadline)
 		c.lruList.MoveToFront(elem)
 	} else {
