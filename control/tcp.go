@@ -69,6 +69,9 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 
 	// Dial
 	LogDial(src, dst, domain, dialOption, networkType, routingResult)
+	if dialOption.Dialer.Property().Name == "block" {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
 	rConn, err := dialOption.Dialer.DialContext(ctx, common.MagicNetwork("tcp", dialOption.Mark), dialOption.DialTarget)

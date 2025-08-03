@@ -196,6 +196,9 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 		// Dial
 		// Only print routing for new connection to avoid the log exploded (Quic and BT).
 		LogDial(src, dst, domain, dialOption, networkType, routingResult)
+		if dialOption.Dialer.Property().Name == "block" {
+			return nil
+		}
 		// Do not overwrite target.
 		// This fixes a problem that quic connection to google servers.
 		// Reproduce:
