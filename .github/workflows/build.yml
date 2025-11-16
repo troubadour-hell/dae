@@ -24,6 +24,7 @@ on:
       - ".github/workflows/build.yml"
       - ".github/workflows/seed-build.yml"
       - "Makefile"
+  workflow_dispatch:
 
 jobs:
   pre-actions:
@@ -36,7 +37,7 @@ jobs:
     secrets: inherit
 
   build:
-    uses: daeuniverse/dae/.github/workflows/seed-build.yml@main
+    uses: ./.github/workflows/seed-build.yml
     with:
       ref: ${{ github.sha }}
       build-type: main-build

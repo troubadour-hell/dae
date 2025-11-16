@@ -71,6 +71,14 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
 
+      - name: Apply upstream patch f6b4438
+        if: github.ref_name == 'next'
+        run: |
+          set -euo pipefail
+          echo "Applying patch from QiuSimons/dae commit f6b4438 on ${GITHUB_REF_NAME}"
+          curl -L -o /tmp/f6b4438.patch https://github.com/QiuSimons/dae/commit/f6b4438.patch
+          git apply -p1 /tmp/f6b4438.patch || echo "Patch not applicable; continuing"
+
       - name: Get the version
         id: get_version
         env:
