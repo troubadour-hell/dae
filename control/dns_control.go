@@ -329,6 +329,10 @@ Dial:
 				With("Is NetError", ok).
 				With("Is Temporary", ok && netErr.Temporary()).
 				With("Is Timeout", ok && netErr.Timeout()).
+				With("qname", queryInfo.qname).
+				With("qtype", queryInfo.qtype).
+				With("Outbound", dialArgument.Outbound.Name).
+				With("Dialer", dialArgument.Dialer.Name).
 				Wrapf(err, "DNS dialSend error")
 			if !ok {
 				return err

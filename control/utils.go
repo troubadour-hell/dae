@@ -17,11 +17,13 @@ import (
 	"strings"
 	"structs"
 	"syscall"
+	"time"
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -111,6 +113,68 @@ func (c *ControlPlane) RouteDialOption(p *RouteParam) (dialOption *DialOption, e
 		FallbackDialer:    fallbackDialer,
 		// Mark:          mark,
 	}, nil
+}
+
+type TrafficLogConn struct {
+	net.Conn
+	logger       *TrafficLogger
+	src, dst     string
+	readBytes    int64
+	writtenBytes int64
+	counter      prometheus.Counter
+	flushTimer   *time.Timer
+	interval     time.Duration
+}
+
+func NewTrafficLogConn(conn net.Conn, logger *TrafficLogger, counter prometheus.Counter, src, dst string) *TrafficLogConn {
+	return &TrafficLogConn{
+		Conn:     conn,
+		src:      src,
+		dst:      dst,
+		logger:   logger,
+		counter:  counter,
+		interval: 15 * time.Second,
+	}
+}
+
+func (tc *TrafficLogConn) flush() {
+	if tc.readBytes > 0 {
+		tc.counter.Add(float64(tc.readBytes))
+		tc.readBytes = 0
+	}
+	if tc.writtenBytes > 0 {
+		tc.counter.Add(float64(tc.writtenBytes))
+		tc.writtenBytes = 0
+	}
+	tc.flushTimer = nil
+}
+
+func (tc *TrafficLogConn) Read(p []byte) (int, error) {
+	n, err := tc.Conn.Read(p)
+	tc.readBytes += int64(n)
+	if tc.flushTimer == nil {
+		tc.flushTimer = time.AfterFunc(tc.interval, tc.flush)
+	}
+	tc.logger.Log(tc.src, tc.dst, "down", int64(n))
+	return n, err
+}
+
+func (tc *TrafficLogConn) Write(p []byte) (int, error) {
+	n, err := tc.Conn.Write(p)
+	tc.writtenBytes += int64(n)
+	if tc.flushTimer == nil {
+		tc.flushTimer = time.AfterFunc(tc.interval, tc.flush)
+	}
+	tc.logger.Log(tc.src, tc.dst, "up", int64(n))
+	return n, err
+}
+
+func (tc *TrafficLogConn) Close() error {
+	if tc.flushTimer != nil {
+		tc.flushTimer.Stop()
+		tc.flush()
+	}
+	return tc.Conn.Close()
 }
 
 func LogDial(src, dst netip.AddrPort, domain string, dialOption *DialOption, networkType *common.NetworkType, routingResult *bpfRoutingResult) {

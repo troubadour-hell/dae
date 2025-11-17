@@ -6,6 +6,7 @@
 package control
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net"
@@ -46,6 +47,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+var (
+	LogFileDir string
+)
+
 type ControlPlane struct {
 	core       *controlPlaneCore
 	deferFuncs []func() error
@@ -76,6 +81,7 @@ type ControlPlane struct {
 	tproxyPortProtect  bool
 	soMarkFromDae      uint32
 
+	trafficLogger      *TrafficLogger
 	PrometheusRegistry *prometheus.Registry
 }
 
@@ -355,6 +361,10 @@ func NewControlPlane(
 	if err != nil {
 		return nil, oops.Errorf("RoutingMatcherBuilder.BuildUserspace: %w", err)
 	}
+	trafficLogger, err := NewTrafficLogger(filepath.Join(LogFileDir, "traffic.log"), 5*time.Minute)
+	if err != nil {
+		return nil, oops.Errorf("NewTrafficLogger: %w", err)
+	}
 
 	// New control plane.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -378,6 +388,7 @@ func NewControlPlane(
 		sniffingTimeout:        sniffingTimeout,
 		tproxyPortProtect:      global.TproxyPortProtect,
 		soMarkFromDae:          global.SoMarkFromDae,
+		trafficLogger:          trafficLogger,
 		PrometheusRegistry:     prometheusRegistry,
 	}
 	defer func() {
@@ -692,6 +703,38 @@ func (l *Listener) Close() error {
 	return err
 }
 
+func getVmRSS() (int64, error) {
+	file, err := os.Open("/proc/self/status")
+	if err != nil {
+		return 0, oops.Wrapf(err, "could not open /proc/self/status")
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// The line looks like: "VmRSS:	   12345 kB"
+		if strings.HasPrefix(line, "VmRSS:") {
+			// Split the line by whitespace. Result: ["VmRSS:", "12345", "kB"]
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				return 0, oops.Errorf("malformed VmRSS line: %s", line)
+			}
+			rss, err := strconv.ParseInt(fields[1], 10, 64)
+			if err != nil {
+				return 0, oops.Errorf("failed to parse VmRSS value '%s': %w", fields[1], err)
+			}
+			return rss, nil
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return 0, oops.Wrapf(err, "error while scanning /proc/self/status")
+	}
+
+	return 0, oops.Errorf("VmRSS not found in /proc/self/status")
+}
+
 func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err error) {
 	sentReady := false
 	defer func() {
@@ -726,6 +769,23 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 
 	sentReady = true
 	readyChan <- true
+	ticker := time.NewTicker(10 * time.Second)
+	go func() {
+		// Reports memory usage every 10 seconds.
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				rss, err := getVmRSS()
+				common.VmRssKb.Set(float64(rss))
+				if err != nil {
+					log.Warnf("%+v", err, "getVmRSS")
+				}
+			case <-c.ctx.Done():
+				return
+			}
+		}
+	}()
 	go func() {
 		for {
 			select {

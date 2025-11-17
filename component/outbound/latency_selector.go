@@ -270,9 +270,9 @@ func (s *LatencyBasedSelector) NotifyStatusChange(d *dialer.Dialer) {
 				}
 			}
 		}
-		oncePrintLatencies.Do(func() {
-			s.printLatencies(aliveDialers, networkType, log.Infoln)
-		})
+		// oncePrintLatencies.Do(func() {
+		// 	s.printLatencies(aliveDialers, networkType, log.Infoln)
+		// })
 		s.handleAliveStateChange(newDialer != nil, networkType)
 	}
 }

@@ -16,8 +16,8 @@ var (
 	DialerSelectIndex  *prometheus.GaugeVec
 	DialLatency        *prometheus.HistogramVec
 	ErrorCount         *prometheus.CounterVec
-	// TrafficBytes       *prometheus.CounterVec
-	// VmRssKb            prometheus.Gauge
+	TrafficBytes       *prometheus.CounterVec
+	VmRssKb            prometheus.Gauge
 )
 
 func InitPrometheus(registry *prometheus.Registry) {
@@ -87,17 +87,17 @@ func InitPrometheus(registry *prometheus.Registry) {
 		},
 		labels,
 	)
-	// TrafficBytes = prometheus.NewCounterVec(
-	// 	prometheus.CounterOpts{
-	// 		Name: "dae_traffic_bytes",
-	// 	},
-	// 	[]string{"outbound", "subtag", "network", "dst"}, //, "direction", "src"},
-	// )
-	// VmRssKb = prometheus.NewGauge(
-	// 	prometheus.GaugeOpts{
-	// 		Name: "dae_vm_rss_kb",
-	// 	},
-	// )
+	TrafficBytes = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dae_traffic_bytes",
+		},
+		[]string{"outbound", "subtag", "network", "dst"}, //, "direction", "src"},
+	)
+	VmRssKb = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dae_vm_rss_kb",
+		},
+	)
 	registry.MustRegister(ActiveConnections)
 	// registry.MustRegister(CoreIpDomainBitmap)
 	// registry.MustRegister(DeadlineTimers)
@@ -109,6 +109,6 @@ func InitPrometheus(registry *prometheus.Registry) {
 	registry.MustRegister(DialerSelectIndex)
 	registry.MustRegister(DialLatency)
 	registry.MustRegister(ErrorCount)
-	// registry.MustRegister(TrafficBytes)
-	// registry.MustRegister(VmRssKb)
+	registry.MustRegister(TrafficBytes)
+	registry.MustRegister(VmRssKb)
 }

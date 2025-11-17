@@ -125,6 +125,8 @@ var (
 )
 
 func Run(conf *config.Config, externGeoDataDirs []string) {
+	control.LogFileDir = filepath.Dir(logFile)
+
 	// Remove AbortFile at beginning.
 	_ = os.Remove(AbortFile)
 
@@ -318,7 +320,7 @@ func startPprofServer(port uint16) {
 	if port == 0 {
 		return
 	}
-	pprofServer = &http.Server{Addr: fmt.Sprintf("localhost:%d", port)}
+	pprofServer = &http.Server{Addr: fmt.Sprintf(":%d", port)}
 	go pprofServer.ListenAndServe()
 	runtime.SetBlockProfileRate(1)
 	runtime.SetMutexProfileFraction(1)
@@ -334,7 +336,7 @@ func startPrometheusServer(port uint16, prometheusRegistry *prometheus.Registry)
 		return
 	}
 
-	prometheusServer = &http.Server{Addr: fmt.Sprintf("localhost:%d", port), Handler: promhttp.HandlerFor(prometheusRegistry, promhttp.HandlerOpts{})}
+	prometheusServer = &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: promhttp.HandlerFor(prometheusRegistry, promhttp.HandlerOpts{})}
 	go prometheusServer.ListenAndServe()
 }
 

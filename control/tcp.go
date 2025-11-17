@@ -116,8 +116,17 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	defer common.ActiveConnections.With(labels).Dec()
 	defer rConn.Close()
 
+	counterForTraffic := common.TrafficBytes.With(prometheus.Labels{
+		"outbound": dialOption.Outbound.Name,
+		"subtag":   dialOption.Dialer.Property.SubscriptionTag,
+		"network":  networkType.String(),
+		"dst":      dialOption.DialTarget,
+	})
+	rLogConn := NewTrafficLogConn(rConn, c.trafficLogger, counterForTraffic, src.Addr().String(), dialOption.DialTarget)
+	defer rLogConn.Close()
+
 	// Relay
-	if err := RelayTCP(sniffer, rConn); err != nil {
+	if err := RelayTCP(sniffer, rLogConn); err != nil {
 		netErr, ok := IsNetError(err)
 		err = oops.
 			In("RelayTCP").
