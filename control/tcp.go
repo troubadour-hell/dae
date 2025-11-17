@@ -7,9 +7,11 @@ package control
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -18,8 +20,10 @@ import (
 	"github.com/daeuniverse/dae/component/sniffing"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
+	dnsmessage "github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/oops"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
 
@@ -28,7 +32,78 @@ const (
 	DefaultNatTimeoutTCPEstablished = 21600 * time.Second
 )
 
+func readDnsMsg(r io.Reader) (*dnsmessage.Msg, error) {
+	var length uint16
+	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+		return nil, err
+	}
+	m := make([]byte, length)
+	if _, err := io.ReadFull(r, m); err != nil {
+		return nil, err
+	}
+	msg := new(dnsmessage.Msg)
+	if err := msg.Unpack(m); err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+func writeDnsMsg(msg *dnsmessage.Msg, w io.Writer) error {
+	buf := pool.GetBuffer(512)
+	defer pool.PutBuffer(buf)
+	res, err := msg.PackBuffer(buf)
+	if err != nil {
+		return err
+	}
+	if err = binary.Write(w, binary.BigEndian, uint16(len(res))); err == nil {
+		if _, err = w.Write(res); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+func (c *ControlPlane) handleTcpDns(
+	lConn net.Conn, src, dst netip.AddrPort, routingResult *bpfRoutingResult) error {
+	msg, err := readDnsMsg(lConn)
+	if err != nil {
+		return oops.Wrapf(err, "failed to read tcp dns request")
+	}
+	req := &dnsRequest{
+		src:           src,
+		dst:           dst,
+		routingResult: routingResult,
+		isTcp:         true,
+	}
+	queryInfo := c.dnsController.prepareQueryInfo(msg)
+	if err = c.dnsController.handleDNSRequest(msg, req, queryInfo); err != nil {
+		log.Errorf("Failed to handle tcp dns request: %v", err)
+		msg = new(dnsmessage.Msg)
+		msg.SetRcode(msg, dnsmessage.RcodeServerFailure)
+	}
+	if err = writeDnsMsg(msg, lConn); err != nil {
+		return oops.Wrapf(err, "failed to write tcp dns response")
+	}
+	return nil
+}
+
 func (c *ControlPlane) handleConn(lConn net.Conn) error {
+	// Get tuples and outbound.
+	src := lConn.RemoteAddr().(*net.TCPAddr).AddrPort()
+	dstTcpAddr := lConn.LocalAddr().(*net.TCPAddr)
+	dst := dstTcpAddr.AddrPort()
+	istcpdns := IsPrivateIP(dstTcpAddr.IP) && dstTcpAddr.Port == 53
+	routingResult, err := c.core.RetrieveRoutingResult(src, dst, unix.IPPROTO_TCP)
+	if err != nil {
+		return oops.Wrapf(err, "failed to retrieve target info %v", dst.String())
+	}
+
+	src = common.ConvergeAddrPort(src)
+	dst = common.ConvergeAddrPort(dst)
+	if istcpdns {
+		return c.handleTcpDns(lConn, src, dst, routingResult)
+	}
+
 	// Sniff target domain.
 	sniffer := sniffing.NewConnSniffer(lConn, c.sniffingTimeout)
 	// ConnSniffer should be used later, so we cannot close it now.
@@ -47,16 +122,6 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		}
 		return oops.Wrapf(err, "Sniff Failed")
 	}
-
-	// Get tuples and outbound.
-	src := lConn.RemoteAddr().(*net.TCPAddr).AddrPort()
-	dst := lConn.LocalAddr().(*net.TCPAddr).AddrPort()
-	routingResult, err := c.core.RetrieveRoutingResult(src, dst, unix.IPPROTO_TCP)
-	if err != nil {
-		return oops.Wrapf(err, "failed to retrieve target info %v", dst.String())
-	}
-	src = common.ConvergeAddrPort(src)
-	dst = common.ConvergeAddrPort(dst)
 
 	// Route
 	networkType := &common.NetworkType{
