@@ -437,6 +437,9 @@ func NewControlPlane(
 		BestDialerChooser: plane.chooseBestDnsDialer,
 		IpVersionPrefer:   dnsConfig.IpVersionPrefer,
 		FixedDomainTtl:    fixedDomainTtl,
+		MinSniffingTtl:    dnsConfig.MinSniffingTtl,
+		EnableCache:       dnsConfig.EnableCache,
+		SniffVerifyMode:   plane.sniffVerifyMode,
 	}); err != nil {
 		return nil, err
 	}
@@ -572,61 +575,58 @@ func (c *ControlPlane) InjectBpf(bpf *bpfObjects) {
 
 func (c *ControlPlane) cacheDnsUpstream(dnsUpstream *dns.Upstream) {
 	/// Updates dns cache to support domain routing for hostname of dns_upstream.
-	deadline := time.Hour * 24 * 365 * 10 // Ten years later.
 	fqdn := dnsmessage.CanonicalName(dnsUpstream.Hostname)
+	var ips []netip.Addr
 
 	if dnsUpstream.Ip4.IsValid() {
-		typ := dnsmessage.TypeA
-		answers := []dnsmessage.RR{&dnsmessage.A{
-			Hdr: dnsmessage.RR_Header{
-				Name:   dnsmessage.CanonicalName(fqdn),
-				Rrtype: typ,
-				Class:  dnsmessage.ClassINET,
-				Ttl:    0, // Must be zero.
-			},
-			A: dnsUpstream.Ip4.AsSlice(),
-		}}
-		c.dnsController.LookupCache(queryInfo{qname: fqdn, qtype: typ}, answers, int(deadline.Seconds()))
+		ips = append(ips, dnsUpstream.Ip4)
+
 	}
 
 	if dnsUpstream.Ip6.IsValid() {
-		typ := dnsmessage.TypeAAAA
-		answers := []dnsmessage.RR{&dnsmessage.AAAA{
-			Hdr: dnsmessage.RR_Header{
-				Name:   dnsmessage.CanonicalName(fqdn),
-				Rrtype: typ,
-				Class:  dnsmessage.ClassINET,
-				Ttl:    0, // Must be zero.
-			},
-			AAAA: dnsUpstream.Ip6.AsSlice(),
-		}}
-		c.dnsController.LookupCache(queryInfo{qname: fqdn, qtype: typ}, answers, int(deadline.Seconds()))
+		ips = append(ips, dnsUpstream.Ip6)
+
 	}
+	c.dnsController.MaybeUpdateLookupCache(fqdn, ips, time.Hour*24*365*10) // Ten years later.
 }
 
 // verified 返回 domain 是不是 dst 的域名
 // shouldReroute 返回 Kernel 是否有可能没有正确 Route
 // SniffVerifyMode_Loose 在这个域名存在时, 通过认证
 // SniffVerifyMode_Strict 在这个域名尝试过对应的 DNS 解析时, 通过认证
-func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.AddrPort, domain string) (verified bool, shouldReroute bool) {
+func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.AddrPort, domain string) (verified bool, shouldRerouteFunc func() bool) {
 	if domain == "" {
 		return
 	}
 	fqdn := dnsmessage.CanonicalName(domain)
-	if dnsCache := c.dnsController.lookupCache.Get(queryInfo{qname: fqdn, qtype: common.AddrToDnsType(dst.Addr())}); dnsCache != nil {
-		includeInCache := IncludeIp(dst.Addr(), dnsCache)
+	if submap, ok := c.dnsController.deadlineTimers[fqdn]; ok {
 		// Successful sniff without DNS lookup record.
 		// In this case, the kernel may not handle domain match set, so re-route is required.
-		shouldReroute = !includeInCache
 		switch c.sniffVerifyMode {
 		case consts.SniffVerifyMode_None, consts.SniffVerifyMode_Loose:
 			verified = true
+			shouldRerouteFunc = func() bool {
+				_, validIP := submap[dst.Addr()]
+				return !validIP
+			}
 		case consts.SniffVerifyMode_Strict:
-			verified = includeInCache
+			_, validIP := submap[dst.Addr()]
+			verified = validIP
+			shouldRerouteFunc = func() bool {
+				return !validIP
+			}
 		}
 	} else {
 		// Successful sniff without DNS lookup record.
-		shouldReroute = true
+		// Only tries to reroute when the domain is mentioned in routing rules.
+		shouldRerouteFunc = func() bool {
+			for _, v := range c.routingMatcher.domainMatcher.MatchDomainBitmap(fqdn) {
+				if v != 0 {
+					return true
+				}
+			}
+			return false
+		}
 		// Check if the domain is in real-domain set (bloom filter).
 		switch c.sniffVerifyMode {
 		case consts.SniffVerifyMode_None:
@@ -769,18 +769,22 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 
 	sentReady = true
 	readyChan <- true
-	ticker := time.NewTicker(10 * time.Second)
+	tickerVmRSS := time.NewTicker(10 * time.Second)
+	tickerResetTraffic := time.NewTicker(1 * time.Hour)
 	go func() {
 		// Reports memory usage every 10 seconds.
-		defer ticker.Stop()
+		defer tickerVmRSS.Stop()
+		defer tickerResetTraffic.Stop()
 		for {
 			select {
-			case <-ticker.C:
+			case <-tickerVmRSS.C:
 				rss, err := getVmRSS()
 				common.VmRssKb.Set(float64(rss))
 				if err != nil {
 					log.Warnf("%+v", err, "getVmRSS")
 				}
+			case <-tickerResetTraffic.C:
+				common.TrafficBytes.Reset()
 			case <-c.ctx.Done():
 				return
 			}
@@ -846,7 +850,7 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 				if routingResult.Must == 0 {
 					var dnsMessage dnsmessage.Msg
 					if err := dnsMessage.Unpack(data); err == nil {
-						c.dnsController.Handle(&dnsMessage, &udpRequest{
+						c.dnsController.Handle(&dnsMessage, &dnsRequest{
 							src:           src,
 							dst:           dst,
 							routingResult: routingResult,
@@ -910,7 +914,7 @@ func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (liste
 }
 
 func (c *ControlPlane) chooseBestDnsDialer(
-	req *udpRequest,
+	req *dnsRequest,
 	dnsUpstream *dns.Upstream,
 ) (*dialArgument, error) {
 	/// Choose the best l4proto+ipversion dialer, and change taregt DNS to the best ipversion DNS upstream for DNS request.

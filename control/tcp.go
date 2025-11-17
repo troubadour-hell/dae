@@ -7,6 +7,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -37,6 +38,11 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	if err != nil && !sniffing.IsSniffingError(err) {
 		// We ignore lConn errors or temporary network errors
 		if _, ok := IsNetError(err); ok {
+			return nil
+		}
+		// Avoid massive EOF logs. A common case: clients (e.g. browser) tend to establish both
+		// ipv4 and ipv6 connections, and then close one of them.
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		return oops.Wrapf(err, "Sniff Failed")
@@ -112,9 +118,9 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 
 	elapsed := time.Since(start).Seconds()
 	common.DialLatency.With(labels).Observe(elapsed)
-	common.ActiveConnections.With(labels).Inc()
-	defer common.ActiveConnections.With(labels).Dec()
-	defer rConn.Close()
+	activeConnectionsCounter := common.ActiveConnections.With(labels)
+	activeConnectionsCounter.Inc()
+	defer activeConnectionsCounter.Dec()
 
 	counterForTraffic := common.TrafficBytes.With(prometheus.Labels{
 		"outbound": dialOption.Outbound.Name,
@@ -156,23 +162,31 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	return nil
 }
 
-type ConnWithReadTimeout struct {
-	net.Conn
+type relayResult struct {
+	err       error
+	direction bool // true for lConn->rConn, false for rConn->lConn
 }
 
-func (c *ConnWithReadTimeout) Read(p []byte) (int, error) {
-	c.Conn.SetReadDeadline(time.Now().Add(DefaultNatTimeoutTCPEstablished))
-	return c.Conn.Read(p)
-}
+func relayDirection(dst, src net.Conn, result chan<- relayResult, direction bool) {
+	src.SetReadDeadline(time.Now().Add(DefaultNatTimeoutTCPEstablished))
 
-func relayDirection(dst, src net.Conn) (err error) {
 	// As `io.Copy` uses a 32KB buffer, we create a buffer of the same size.
 	// See https://cs.opensource.google/go/go/+/refs/tags/go1.21.5:src/io/io.go;l=419
-	bufPtr := pool.GetBuffer(1024 * 32) // 32KB
+	bufSize := 16 * 1024
+	if direction {
+		bufSize = 8 * 1024
+	}
+	bufPtr := pool.GetBuffer(bufSize)
 	defer pool.PutBuffer(bufPtr)
-
-	_, err = io.CopyBuffer(dst, &ConnWithReadTimeout{Conn: src}, bufPtr)
-	return
+	_, err := io.CopyBuffer(dst, src, bufPtr)
+	result <- relayResult{err: err, direction: direction}
+	if err != nil {
+		dst.Close()
+	} else if writeCloser, ok := dst.(netproxy.CloseWriter); ok {
+		writeCloser.CloseWrite()
+	} else {
+		dst.SetReadDeadline(time.Now().Add(10 * time.Second))
+	}
 }
 
 // Error1 is the error from lConn to rConn
@@ -180,66 +194,37 @@ func relayDirection(dst, src net.Conn) (err error) {
 // TODO: 引入 ctx, 在 dialer 不可用时取消 relay
 // 进一步的, 给 lConn 发送 rst
 func RelayTCP(lConn, rConn net.Conn) error {
-	errCh := make(chan struct {
-		err       error
-		direction bool
-	}, 2)
+	resultCh := make(chan relayResult, 2)
 
-	// Start relay goroutine from rConn to lConn
-	go func(dst, src net.Conn) {
-		err := relayDirection(dst, src)
-		errCh <- struct {
-			err       error
-			direction bool
-		}{err: err, direction: false}
-		if err != nil {
-			dst.Close()
-		} else if writeCloser, ok := dst.(netproxy.CloseWriter); ok {
-			writeCloser.CloseWrite()
-		} else {
-			dst.SetReadDeadline(time.Now().Add(10 * time.Second))
-		}
-	}(lConn, rConn)
-	// Start relay goroutine from lConn to rConn
-	func(dst, src net.Conn) {
-		err := relayDirection(dst, src)
-		errCh <- struct {
-			err       error
-			direction bool
-		}{err: err, direction: true}
-		if err != nil {
-			dst.Close()
-		} else if writeCloser, ok := dst.(netproxy.CloseWriter); ok {
-			writeCloser.CloseWrite()
-		} else {
-			dst.SetReadDeadline(time.Now().Add(10 * time.Second))
-		}
-	}(rConn, lConn)
-	err := <-errCh
-	<-errCh
+	// Start relay goroutines for both directions.
+	go relayDirection(lConn, rConn, resultCh, false) // rConn -> lConn
+	go relayDirection(rConn, lConn, resultCh, true)  // lConn -> rConn
+	result := <-resultCh
+	<-resultCh
 
-	if err.err != nil {
+	err := result.err
+	if err != nil {
 		// We ignore lConn errors or temporary network errors
 		// TODO: Why get EOF as an error?
-		if err.direction { // l -> r
+		if result.direction { // l -> r
 			switch {
-			case err.err == io.EOF,
-				strings.HasSuffix(err.err.Error(), "canceled by remote with error code 0"), // rConn closed
-				strings.Contains(err.err.Error(), "read:"):                                 // lConn Read
-				err.err = nil
+			case err == io.EOF,
+				strings.HasSuffix(err.Error(), "canceled by remote with error code 0"), // rConn closed
+				strings.Contains(err.Error(), "read:"):                                 // lConn Read
+				err = nil
 			default:
-				err.err = oops.In("lConn -> rConn Relay").Wrap(err.err)
+				err = oops.In("lConn -> rConn Relay").Wrap(err)
 			}
 
 		} else { // r -> l
 			switch {
-			case strings.Contains(err.err.Error(), "write:"): // lConn Write
-				err.err = nil
+			case strings.Contains(err.Error(), "write:"): // lConn Write
+				err = nil
 			default:
-				err.err = oops.In("rConn -> lConn Relay").Wrap(err.err)
+				err = oops.In("rConn -> lConn Relay").Wrap(err)
 			}
 		}
 	}
 
-	return err.err
+	return err
 }

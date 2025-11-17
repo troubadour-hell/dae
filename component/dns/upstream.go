@@ -94,6 +94,7 @@ type Upstream struct {
 	Port     uint16
 	Path     string
 	*netutils.Ip46
+	IsAsIs bool
 }
 
 // TODO: Sync with outbound

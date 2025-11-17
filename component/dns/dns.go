@@ -27,6 +27,7 @@ type Dns struct {
 	upstream2Index   map[*Upstream]int
 	reqMatcher       *RequestMatcher
 	respMatcher      *ResponseMatcher
+	hasResponseRules bool
 }
 
 type NewOption struct {
@@ -101,6 +102,7 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 		return nil, fmt.Errorf("failed to build DNS request routing: %w", err)
 	}
 	// Parse response routing.
+	s.hasResponseRules = len(dns.Routing.Response.Rules) > 0
 	respMatcherBuilder, err := NewResponseMatcherBuilder(dns.Routing.Response.Rules, upstreamName2Id, dns.Routing.Response.Fallback)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build DNS response routing: %w", err)
@@ -124,6 +126,10 @@ func (s *Dns) CheckUpstreamsFormat() error {
 
 func (s *Dns) GetUpstream(upstreamIndex consts.DnsRequestOutboundIndex) (upstream *Upstream, err error) {
 	return s.upstream[upstreamIndex].GetUpstream()
+}
+
+func (s *Dns) HasResponseRules() bool {
+	return s.hasResponseRules
 }
 
 func (s *Dns) RequestSelect(qname string, qtype uint16) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {

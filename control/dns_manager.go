@@ -108,17 +108,22 @@ func (m *DnsManager) IsClosed() bool {
 }
 
 func (m *DnsManager) Resolve(msg *dnsmessage.Msg) error {
-	data, err := msg.Pack()
+	buf := pool.GetBuffer(1024)
+	defer pool.PutBuffer(buf)
+	var data []byte
+	var err error
+	if m.stream {
+		if data, err = msg.PackBuffer(buf[2:]); err == nil {
+			dataLen := uint16(len(data))
+			binary.BigEndian.PutUint16(buf, dataLen)
+			data = buf[:dataLen+2]
+		}
+	} else {
+		data, err = msg.PackBuffer(buf)
+	}
 	if err != nil {
 		return oops.Wrapf(err, "pack DNS packet")
 	}
-
-	buf := pool.GetBytesBuffer()
-	defer pool.PutBytesBuffer(buf)
-	if m.stream {
-		binary.Write(buf, binary.BigEndian, uint16(len(data)))
-	}
-	buf.Write(data)
 
 	recvCh := make(chan *dnsmessage.Msg, 1)
 	m.recvMap.Store(msg.Id, recvCh)
@@ -130,8 +135,7 @@ func (m *DnsManager) Resolve(msg *dnsmessage.Msg) error {
 	errCh := make(chan error, 1)
 	go func() {
 		for i := 0; i < consts.DefaultDNSRetryCount; i++ {
-			_, err := m.conn.Write(buf.Bytes())
-			if err != nil {
+			if _, err := m.conn.Write(data); err != nil {
 				errCh <- err
 				return
 			}

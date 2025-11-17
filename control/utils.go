@@ -58,7 +58,7 @@ func (c *ControlPlane) RouteDialOption(p *RouteParam) (dialOption *DialOption, e
 
 	verified, shouldReroute := c.VerifySniff(outboundIndex, p.Dest, p.Domain)
 	switch {
-	case c.rerouteMode == consts.RerouteMode_WhileNeed && shouldReroute,
+	case c.rerouteMode == consts.RerouteMode_WhileNeed && shouldReroute != nil && shouldReroute(),
 		c.rerouteMode == consts.RerouteMode_Force:
 		outboundIndex = consts.OutboundControlPlaneRouting
 	}

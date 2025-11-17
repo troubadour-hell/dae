@@ -5,11 +5,11 @@ import (
 )
 
 var (
-	ActiveConnections *prometheus.GaugeVec
-	// CoreIpDomainBitmap prometheus.Gauge
-	// DeadlineTimers     prometheus.Gauge
-	// DnsCacheSize       prometheus.Gauge
-	// DnsCacheHit        *prometheus.CounterVec
+	ActiveConnections  *prometheus.GaugeVec
+	CoreIpDomainBitmap prometheus.Gauge
+	DeadlineTimers     prometheus.Gauge
+	DnsCacheSize       prometheus.Gauge
+	DnsCacheHit        *prometheus.CounterVec
 	CheckLatency       *prometheus.GaugeVec
 	CheckMovingLatency *prometheus.GaugeVec
 	CheckSelectLatency *prometheus.GaugeVec
@@ -28,27 +28,27 @@ func InitPrometheus(registry *prometheus.Registry) {
 		},
 		labels,
 	)
-	// CoreIpDomainBitmap = prometheus.NewGauge(
-	// 	prometheus.GaugeOpts{
-	// 		Name: "dae_ip_domain_bitmap",
-	// 	},
-	// )
-	// DeadlineTimers = prometheus.NewGauge(
-	// 	prometheus.GaugeOpts{
-	// 		Name: "dae_deadline_timers",
-	// 	},
-	// )
-	// DnsCacheSize = prometheus.NewGauge(
-	// 	prometheus.GaugeOpts{
-	// 		Name: "dae_dns_cache_size",
-	// 	},
-	// )
-	// DnsCacheHit = prometheus.NewCounterVec(
-	// 	prometheus.CounterOpts{
-	// 		Name: "dae_dns_cache_hit",
-	// 	},
-	// 	[]string{"outbound", "qtype"},
-	// )
+	CoreIpDomainBitmap = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dae_ip_domain_bitmap",
+		},
+	)
+	DeadlineTimers = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dae_deadline_timers",
+		},
+	)
+	DnsCacheSize = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dae_dns_cache_size",
+		},
+	)
+	DnsCacheHit = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dae_dns_cache_hit",
+		},
+		[]string{"outbound", "qtype"},
+	)
 	CheckLatency = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "dae_check_latency",
@@ -99,10 +99,10 @@ func InitPrometheus(registry *prometheus.Registry) {
 		},
 	)
 	registry.MustRegister(ActiveConnections)
-	// registry.MustRegister(CoreIpDomainBitmap)
-	// registry.MustRegister(DeadlineTimers)
-	// registry.MustRegister(DnsCacheSize)
-	// registry.MustRegister(DnsCacheHit)
+	registry.MustRegister(CoreIpDomainBitmap)
+	registry.MustRegister(DeadlineTimers)
+	registry.MustRegister(DnsCacheSize)
+	registry.MustRegister(DnsCacheHit)
 	registry.MustRegister(CheckLatency)
 	registry.MustRegister(CheckMovingLatency)
 	registry.MustRegister(CheckSelectLatency)

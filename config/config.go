@@ -130,6 +130,8 @@ type Dns struct {
 	FixedDomainTtl  []KeyableString `mapstructure:"fixed_domain_ttl"`
 	Upstream        []KeyableString `mapstructure:"upstream"`
 	Routing         DnsRouting      `mapstructure:"routing"`
+	MinSniffingTtl  time.Duration   `mapstructure:"min_sniffing_ttl" default:"24h"`
+	EnableCache     bool            `mapstructure:"enable_cache" default:"true"`
 }
 
 type Routing struct {
