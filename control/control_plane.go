@@ -323,11 +323,13 @@ func NewControlPlane(
 
 	/// Node Connectivity Check.
 	for _, g := range outbounds {
+		deferFuncs = append(deferFuncs, g.Close)
 		for _, d := range g.Dialers {
 			// We only activate check of nodes that have a group.
 			d.ActivateCheck(wg)
 		}
 	}
+	deferFuncs = append(deferFuncs, dialerSet.Close)
 
 	/// Routing.
 	// Apply rules optimizers.
