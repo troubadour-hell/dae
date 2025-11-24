@@ -173,8 +173,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 h1:o4JXh1EVt9k/+g42oCprj/FisM4qX9L3sZB3upGN2ZU=
 github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55/go.mod h1:OmDBASR4679mdNQnz2pUhc2G8CO2JrUAVFDRBDP/hJE=
-github.com/ppdragon16/outbound v0.0.0-20251118222815-751bb3b91e5d h1:Q9Ti6E8Ge3Rg8nmubpTdFkcEiXrgJPiy+6V3E1ROvKU=
-github.com/ppdragon16/outbound v0.0.0-20251118222815-751bb3b91e5d/go.mod h1:aO3GiAblAw0LWxjeFYSc2yyn/koBGvsi2DhBTFQMKVo=
+github.com/ppdragon16/outbound v0.0.0-20251124100155-147247e72884 h1:D4x3McxtP0x7oPaRehWwnJ9qzu6V4LZah1sFD9W7UiE=
+github.com/ppdragon16/outbound v0.0.0-20251124100155-147247e72884/go.mod h1:aO3GiAblAw0LWxjeFYSc2yyn/koBGvsi2DhBTFQMKVo=
 github.com/prashantv/gostub v1.1.0 h1:BTyx3RfQjRHnUWaGF9oQos79AlQ5k8WNktv7VGvVH4g=
 github.com/prashantv/gostub v1.1.0/go.mod h1:A5zLQHz7ieHGG7is6LLXLz7I8+3LZzsrV0P1IAHhP5U=
 github.com/prometheus/client_golang v1.22.0 h1:rb93p9lokFEsctTys46VnV1kLCDpVZ0a/Y92Vm0Zc6Q=
