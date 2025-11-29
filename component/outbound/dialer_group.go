@@ -77,6 +77,10 @@ func (g *DialerGroup) Close() error {
 	return nil
 }
 
+func (g *DialerGroup) GetAnnotation(d *dialer.Dialer) *dialer.Annotation {
+	return g.dialerToAnnotation[d]
+}
+
 // Returns the priority given an observed latency.
 // If a "ConditionalPriority" is present, it is applied;
 // Otherwise the default fixed Priority is returned.

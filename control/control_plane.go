@@ -9,7 +9,9 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -83,6 +85,8 @@ type ControlPlane struct {
 
 	trafficLogger      *TrafficLogger
 	PrometheusRegistry *prometheus.Registry
+
+	commandServer *http.Server
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -520,7 +524,75 @@ func NewControlPlane(
 		return nil, oops.Errorf("bindDaens: %w", err)
 	}
 
+	if global.CommandPort != 0 {
+		plane.commandServer = &http.Server{Addr: fmt.Sprintf(":%d", global.CommandPort), Handler: plane}
+		go plane.commandServer.ListenAndServe()
+	}
+
 	return plane, nil
+}
+
+func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	writer := bufio.NewWriter(w)
+	defer writer.Flush()
+
+	switch r.URL.Path {
+	case "/priority":
+		outbound := r.FormValue("outbound")
+		dialerName := r.FormValue("dialer")
+		subtag := r.FormValue("subtag")
+		priorityStr := r.FormValue("priority")
+		if len(priorityStr) == 0 {
+			for _, dg := range c.outbounds {
+				if len(outbound) != 0 && dg.Name != outbound {
+					continue
+				}
+				fmt.Fprintf(writer, "===== Outbound '%s':\n", dg.Name)
+				for _, d := range dg.Dialers {
+					if len(dialerName) != 0 && !strings.Contains(d.Name, dialerName) {
+						continue
+					}
+					if len(subtag) != 0 && d.SubscriptionTag != subtag {
+						continue
+					}
+					anno := dg.GetAnnotation(d)
+					fmt.Fprintf(writer, "-   [%s] %s: %d;%v\n", d.SubscriptionTag, d.Name, anno.Priority, anno.ConditionalPriority)
+				}
+			}
+			return
+		}
+		for _, dg := range c.outbounds {
+			if dg.Name == outbound {
+				if len(dialerName) == 0 && len(subtag) == 0 {
+					fmt.Fprintf(writer, "Error: dialer name and subtag cannot be both empty\n")
+					return
+				}
+				pri, condPris, err := dialer.ParsePriority(priorityStr)
+				if err != nil {
+					fmt.Fprintf(writer, "Error: %v\n", err)
+					return
+				}
+				var found bool
+				for _, d := range dg.Dialers {
+					if (len(dialerName) == 0 || strings.Contains(d.Name, dialerName)) && (len(subtag) == 0 || d.SubscriptionTag == subtag) {
+						anno := dg.GetAnnotation(d)
+						anno.Priority = pri
+						anno.ConditionalPriority = condPris
+						found = true
+					}
+				}
+				if found {
+					fmt.Fprintf(writer, "OK!\n")
+				} else {
+					fmt.Fprintf(writer, "Dialer '%s' with subtag '%s' not found in outbound '%s'\n", dialerName, subtag, outbound)
+				}
+				return
+			}
+		}
+		fmt.Fprintf(writer, "Outbound '%s' not found\n", outbound)
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func ParseFixedDomainTtl(ks []config.KeyableString) (map[string]int, error) {
@@ -1018,6 +1090,7 @@ func (c *ControlPlane) Close() (err error) {
 			}
 		}
 	}
+	c.commandServer.Shutdown(context.Background())
 	c.cancel()
 	return c.core.Close()
 }
