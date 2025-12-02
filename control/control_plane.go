@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -86,7 +87,8 @@ type ControlPlane struct {
 	trafficLogger      *TrafficLogger
 	PrometheusRegistry *prometheus.Registry
 
-	commandServer *http.Server
+	commandServer     *http.Server
+	outboundRedirects map[consts.OutboundIndex]consts.OutboundIndex
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -396,6 +398,7 @@ func NewControlPlane(
 		soMarkFromDae:          global.SoMarkFromDae,
 		trafficLogger:          trafficLogger,
 		PrometheusRegistry:     prometheusRegistry,
+		outboundRedirects:      make(map[consts.OutboundIndex]consts.OutboundIndex),
 	}
 	defer func() {
 		if err != nil {
@@ -537,6 +540,43 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer writer.Flush()
 
 	switch r.URL.Path {
+	case "/redirect_outbound":
+		redirect := r.URL.RawQuery
+		if len(redirect) > 0 {
+			redirect, _ = url.QueryUnescape(redirect)
+			parts := strings.Split(redirect, "->")
+			if len(parts) != 2 {
+				fmt.Fprintf(writer, "Error: bad format: %s\n", redirect)
+				return
+			}
+			from := -1
+			to := -1
+			for i, dg := range c.outbounds {
+				if dg.Name == parts[0] {
+					from = i
+				}
+				if dg.Name == parts[1] {
+					to = i
+				}
+			}
+			if from < 0 || to < 0 {
+				fmt.Fprintf(writer, "Error: outbound not found\n")
+				return
+			}
+			if from == to {
+				delete(c.outboundRedirects, consts.OutboundIndex(from))
+			} else {
+				c.outboundRedirects[consts.OutboundIndex(from)] = consts.OutboundIndex(to)
+			}
+		}
+		fmt.Fprintf(writer, "===== Outbounds:\n")
+		for i, dg := range c.outbounds {
+			if index, exists := c.outboundRedirects[consts.OutboundIndex(i)]; exists {
+				fmt.Fprintf(writer, "-   %s -> %s\n", dg.Name, c.outbounds[index].Name)
+			} else {
+				fmt.Fprintf(writer, "-   %s\n", dg.Name)
+			}
+		}
 	case "/priority":
 		outbound := r.FormValue("outbound")
 		dialerName := r.FormValue("dialer")
@@ -1024,6 +1064,10 @@ func (c *ControlPlane) chooseBestDnsDialer(
 			}
 			if int(outboundIndex) >= len(c.outbounds) {
 				return nil, oops.Errorf("bad outbound index: %v", outboundIndex)
+			}
+			// Handles outbound redirects
+			if redirected, exists := c.outboundRedirects[outboundIndex]; exists {
+				outboundIndex = redirected
 			}
 			dialerGroup := c.outbounds[outboundIndex]
 			// DNS always dial IP.

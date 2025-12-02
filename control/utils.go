@@ -94,6 +94,10 @@ func (c *ControlPlane) RouteDialOption(p *RouteParam) (dialOption *DialOption, e
 		err = oops.Errorf("outbound id from bpf is out of range: %v not in [0, %v]", outboundIndex, len(c.outbounds)-1)
 		return
 	}
+	// Handles outbound redirects
+	if redirected, exists := c.outboundRedirects[outboundIndex]; exists {
+		outboundIndex = redirected
+	}
 	outbound := c.outbounds[outboundIndex]
 	dialTarget, dialIp := c.ChooseDialTarget(outboundIndex, p.Dest, p.Domain, verified && c.dialTargetOverride)
 	dialer, fallback, err := outbound.SelectFallbackIpVersion(p.networkType, dialIp)
