@@ -276,6 +276,7 @@ func NewControlPlane(
 	meek.CleanGlobalRoundTripperCache()
 
 	dialerSet := outbound.NewDialerSetFromLinks(option, prometheusRegistry, tagToNodeList)
+	groupNameRedirects := make(map[string]string)
 	for _, group := range groups {
 		// Parse policy.
 		policy, err := dialer.NewDialerSelectionPolicyFromGroupParam(&group)
@@ -313,6 +314,19 @@ func NewControlPlane(
 		dialerGroup := outbound.NewDialerGroup(finalOption, group.Name, dialers, annos, *policy,
 			core.outboundAliveChangeCallback(id, group.Name, global.NoConnectivityTrySniff, noConnectivityOutbound))
 		outbounds = append(outbounds, dialerGroup)
+		if len(group.Redirect) > 0 && group.Name != group.Redirect {
+			groupNameRedirects[group.Name] = group.Redirect
+		}
+	}
+	outboundRedirects := make(map[consts.OutboundIndex]consts.OutboundIndex)
+	for fromName, toName := range groupNameRedirects {
+		from, err1 := OutboundIndexByName(outbounds, fromName)
+		to, err2 := OutboundIndexByName(outbounds, toName)
+		if err1 != nil || err2 != nil {
+			return nil, oops.Errorf("redirect outbound not found: %v->%v", fromName, toName)
+		}
+		outboundRedirects[from] = to
+		log.Infof("Outbound redirect: %v (%v) -> %v (%v)", fromName, from, toName, to)
 	}
 
 	// Generate outboundName2Id from outbounds.
@@ -398,7 +412,7 @@ func NewControlPlane(
 		soMarkFromDae:          global.SoMarkFromDae,
 		trafficLogger:          trafficLogger,
 		PrometheusRegistry:     prometheusRegistry,
-		outboundRedirects:      make(map[consts.OutboundIndex]consts.OutboundIndex),
+		outboundRedirects:      outboundRedirects,
 	}
 	defer func() {
 		if err != nil {
@@ -549,24 +563,16 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(writer, "Error: bad format: %s\n", redirect)
 				return
 			}
-			from := -1
-			to := -1
-			for i, dg := range c.outbounds {
-				if dg.Name == parts[0] {
-					from = i
-				}
-				if dg.Name == parts[1] {
-					to = i
-				}
-			}
-			if from < 0 || to < 0 {
+			from, err1 := OutboundIndexByName(c.outbounds, parts[0])
+			to, err2 := OutboundIndexByName(c.outbounds, parts[1])
+			if err1 != nil || err2 != nil {
 				fmt.Fprintf(writer, "Error: outbound not found\n")
 				return
 			}
 			if from == to {
-				delete(c.outboundRedirects, consts.OutboundIndex(from))
+				delete(c.outboundRedirects, from)
 			} else {
-				c.outboundRedirects[consts.OutboundIndex(from)] = consts.OutboundIndex(to)
+				c.outboundRedirects[from] = to
 			}
 		}
 		fmt.Fprintf(writer, "===== Outbounds:\n")

@@ -101,6 +101,7 @@ func FunctionListOrStringToFunctionList(fs FunctionListOrString) (f []*config_pa
 type Group struct {
 	Name string `mapstructure:"_"`
 
+	Redirect         string                      `mapstructure:"redirect"`
 	Filter           [][]*config_parser.Function `mapstructure:"filter" repeatable:""`
 	FilterAnnotation [][]*config_parser.Param    `mapstructure:"_"`
 	Policy           FunctionListOrString        `mapstructure:"policy" required:""`

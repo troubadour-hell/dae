@@ -386,3 +386,12 @@ func IsPrivateIP(ip net.IP) bool {
 	}
 	return false
 }
+
+func OutboundIndexByName(outbounds []*outbound.DialerGroup, name string) (consts.OutboundIndex, error) {
+	for i, o := range outbounds {
+		if o.Name == name {
+			return consts.OutboundIndex(i), nil
+		}
+	}
+	return consts.OutboundIndex(0xFF), oops.Errorf("outbound not found: %v", name)
+}
