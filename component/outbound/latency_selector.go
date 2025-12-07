@@ -216,10 +216,19 @@ func (s *LatencyBasedSelector) logCheckLatency(aliveDialers []*dialer.Dialer, di
 		common.CheckSelectLatency.With(labels).Set(float64(selectLatency.Milliseconds()))
 	}
 
+	found := false
 	for i, d := range aliveDialers {
+		if d == dialer {
+			found = true
+		}
 		labels["subtag"] = d.Property.SubscriptionTag
 		labels["dialer"] = d.Name
 		common.DialerSelectIndex.With(labels).Set(float64(i))
+	}
+	if !found {
+		labels["subtag"] = dialer.Property.SubscriptionTag
+		labels["dialer"] = dialer.Name
+		common.DialerSelectIndex.With(labels).Set(999)
 	}
 }
 
