@@ -10,10 +10,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -553,20 +553,41 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writer := bufio.NewWriter(w)
 	defer writer.Flush()
 
-	switch r.URL.Path {
-	case "/redirect_outbound":
-		redirect := r.URL.RawQuery
-		if len(redirect) > 0 {
-			redirect, _ = url.QueryUnescape(redirect)
-			parts := strings.Split(redirect, "->")
-			if len(parts) != 2 {
-				fmt.Fprintf(writer, "Error: bad format: %s\n", redirect)
+	parts := strings.Split(r.URL.Path, "/")
+	cmd := parts[1]
+	params := parts[2:]
+
+	switch cmd {
+	case "redirect":
+		if r.Method == "GET" {
+			if len(params) > 0 {
+				http.Error(w, fmt.Sprintf("GET redirect shouldn't have parameters: %v", params), http.StatusBadRequest)
 				return
 			}
-			from, err1 := OutboundIndexByName(c.outbounds, parts[0])
-			to, err2 := OutboundIndexByName(c.outbounds, parts[1])
+			for i, dg := range c.outbounds {
+				if index, exists := c.outboundRedirects[consts.OutboundIndex(i)]; exists {
+					fmt.Fprintf(writer, "- %s -> %s\n", dg.Name, c.outbounds[index].Name)
+				} else {
+					fmt.Fprintf(writer, "- %s\n", dg.Name)
+				}
+			}
+			return
+		}
+		if r.Method == "PUT" {
+			if len(params) != 1 {
+				http.Error(w, fmt.Sprintf("PUT redirect should have 1 parameter, but got: %v", params), http.StatusBadRequest)
+				return
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "failed to read body", http.StatusBadRequest)
+				return
+			}
+			defer r.Body.Close()
+			from, err1 := OutboundIndexByName(c.outbounds, params[0])
+			to, err2 := OutboundIndexByName(c.outbounds, string(body))
 			if err1 != nil || err2 != nil {
-				fmt.Fprintf(writer, "Error: outbound not found\n")
+				http.Error(w, "outbound not found", http.StatusNotFound)
 				return
 			}
 			if from == to {
@@ -574,68 +595,74 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else {
 				c.outboundRedirects[from] = to
 			}
+			fmt.Fprintf(writer, "OK\n")
 		}
-		fmt.Fprintf(writer, "===== Outbounds:\n")
-		for i, dg := range c.outbounds {
-			if index, exists := c.outboundRedirects[consts.OutboundIndex(i)]; exists {
-				fmt.Fprintf(writer, "-   %s -> %s\n", dg.Name, c.outbounds[index].Name)
-			} else {
-				fmt.Fprintf(writer, "-   %s\n", dg.Name)
+	case "priority":
+		if r.Method == "GET" {
+			if len(params) > 0 {
+				http.Error(w, fmt.Sprintf("GET priority shouldn't have parameters: %v", params), http.StatusBadRequest)
+				return
 			}
-		}
-	case "/priority":
-		outbound := r.FormValue("outbound")
-		dialerName := r.FormValue("dialer")
-		subtag := r.FormValue("subtag")
-		priorityStr := r.FormValue("priority")
-		if len(priorityStr) == 0 {
 			for _, dg := range c.outbounds {
-				if len(outbound) != 0 && dg.Name != outbound {
-					continue
-				}
-				fmt.Fprintf(writer, "===== Outbound '%s':\n", dg.Name)
+				fmt.Fprintf(writer, "*** Outbound '%s':\n", dg.Name)
 				for _, d := range dg.Dialers {
-					if len(dialerName) != 0 && !strings.Contains(d.Name, dialerName) {
-						continue
-					}
-					if len(subtag) != 0 && d.SubscriptionTag != subtag {
-						continue
-					}
 					anno := dg.GetAnnotation(d)
 					fmt.Fprintf(writer, "-   [%s] %s: %d;%v\n", d.SubscriptionTag, d.Name, anno.Priority, anno.ConditionalPriority)
 				}
 			}
 			return
 		}
-		for _, dg := range c.outbounds {
-			if dg.Name == outbound {
-				if len(dialerName) == 0 && len(subtag) == 0 {
-					fmt.Fprintf(writer, "Error: dialer name and subtag cannot be both empty\n")
-					return
+		if r.Method == "PUT" {
+			outbound := ""
+			subtag := ""
+			dialerName := ""
+			for _, param := range params {
+				k, v, _ := strings.Cut(param, ":")
+				switch k {
+				case "outbound":
+					outbound = v
+				case "subtag":
+					subtag = v
+				case "dialer":
+					dialerName = v
 				}
-				pri, condPris, err := dialer.ParsePriority(priorityStr)
-				if err != nil {
-					fmt.Fprintf(writer, "Error: %v\n", err)
-					return
-				}
-				var found bool
-				for _, d := range dg.Dialers {
-					if (len(dialerName) == 0 || strings.Contains(d.Name, dialerName)) && (len(subtag) == 0 || d.SubscriptionTag == subtag) {
-						anno := dg.GetAnnotation(d)
-						anno.Priority = pri
-						anno.ConditionalPriority = condPris
-						found = true
-					}
-				}
-				if found {
-					fmt.Fprintf(writer, "OK!\n")
-				} else {
-					fmt.Fprintf(writer, "Dialer '%s' with subtag '%s' not found in outbound '%s'\n", dialerName, subtag, outbound)
-				}
-				return
 			}
+			for _, dg := range c.outbounds {
+				if dg.Name == outbound {
+					if len(dialerName) == 0 && len(subtag) == 0 {
+						http.Error(w, "dialer name and subtag cannot be both empty", http.StatusBadRequest)
+						return
+					}
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						http.Error(w, "failed to read body", http.StatusBadRequest)
+						return
+					}
+					defer r.Body.Close()
+					pri, condPris, err := dialer.ParsePriority(string(body))
+					if err != nil {
+						http.Error(w, fmt.Sprintf("failed to parse priority string: %v", body), http.StatusBadRequest)
+						return
+					}
+					var found bool
+					for _, d := range dg.Dialers {
+						if (len(dialerName) == 0 || strings.Contains(d.Name, dialerName)) && (len(subtag) == 0 || d.SubscriptionTag == subtag) {
+							anno := dg.GetAnnotation(d)
+							anno.Priority = pri
+							anno.ConditionalPriority = condPris
+							found = true
+						}
+					}
+					if found {
+						fmt.Fprintf(writer, "OK\n")
+					} else {
+						http.Error(w, fmt.Sprintf("Dialer '%s' with subtag '%s' not found in outbound '%s'", dialerName, subtag, outbound), http.StatusNotFound)
+					}
+					return
+				}
+			}
+			fmt.Fprintf(writer, "Outbound '%s' not found\n", outbound)
 		}
-		fmt.Fprintf(writer, "Outbound '%s' not found\n", outbound)
 	default:
 		http.NotFound(w, r)
 	}
