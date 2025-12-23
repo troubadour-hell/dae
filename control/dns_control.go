@@ -82,6 +82,9 @@ type DnsController struct {
 	mu              sync.Mutex
 	deadlineTimers  map[string]map[netip.Addr]*time.Timer
 	sniffVerifyMode consts.SniffVerifyMode
+
+	// Object pool for DNS message to reduce allocations
+	msgPool sync.Pool
 }
 
 func parseIpVersionPreference(prefer int) (uint16, error) {
@@ -120,6 +123,11 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		dnsForwarderCache: sync.Map{},
 		dnsCache:          newCommonDnsCache[dnsCacheKey](),
 		deadlineTimers:    make(map[string]map[netip.Addr]*time.Timer),
+		msgPool: sync.Pool{
+			New: func() interface{} {
+				return new(dnsmessage.Msg)
+			},
+		},
 	}, nil
 }
 
@@ -215,7 +223,10 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 				err = c.handleDNSRequest(dnsMessage, req, queryInfo)
 			} else {
 				// Try to make both A and AAAA lookups.
-				dnsMessage2 := deepcopy.Copy(dnsMessage).(*dnsmessage.Msg)
+				// Optimize: reuse DNS message from pool instead of deepcopy
+				dnsMessage2 := c.msgPool.Get().(*dnsmessage.Msg)
+				defer c.msgPool.Put(dnsMessage2)
+				*dnsMessage2 = *dnsMessage // Copy struct fields directly
 				dnsMessage2.Id = uint16(fastrand.Intn(math.MaxUint16))
 				switch queryInfo.qtype {
 				case dnsmessage.TypeA:
@@ -310,7 +321,10 @@ func (c *DnsController) handleDNSRequest(
 	if skipResponseSelect {
 		reqMsg = dnsMessage
 	} else {
-		reqMsg = deepcopy.Copy(dnsMessage).(*dnsmessage.Msg)
+		// Optimize: reuse DNS message from pool instead of deepcopy
+		reqMsg := c.msgPool.Get().(*dnsmessage.Msg)
+		defer c.msgPool.Put(reqMsg)
+		*reqMsg = *dnsMessage // Copy struct fields directly
 	}
 Dial:
 	for invokingDepth := 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
@@ -631,6 +645,19 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 }
 
 func (c *DnsController) Close() error {
+	// Clean up all deadline timers to prevent goroutine leaks
+	c.mu.Lock()
+	for _, ipToTimer := range c.deadlineTimers {
+		for _, timer := range ipToTimer {
+			if timer != nil {
+				timer.Stop()
+			}
+		}
+	}
+	c.deadlineTimers = make(map[string]map[netip.Addr]*time.Timer)
+	c.mu.Unlock()
+
+	// Close all DNS forwarders
 	c.dnsForwarderCache.Range(func(key, value any) bool {
 		if forwarder, ok := value.(io.Closer); ok {
 			forwarder.Close()
