@@ -190,7 +190,7 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 		ue = DefaultUdpEndpointPool.Create(src, &UdpEndpointOptions{
 			PacketConn: udpConn,
 			Handler: func(data []byte, from netip.AddrPort) (err error) {
-				return sendPkt(data, from, src)
+				return sendPkt(data, dst, src)
 			},
 			NatTimeout: DefaultNatTimeoutUDP,
 			Dialer:     dialOption.Dialer,
