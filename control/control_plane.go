@@ -87,7 +87,6 @@ type ControlPlane struct {
 	trafficLogger      *TrafficLogger
 	PrometheusRegistry *prometheus.Registry
 
-	commandServer     *http.Server
 	outboundRedirects map[consts.OutboundIndex]consts.OutboundIndex
 }
 
@@ -539,11 +538,6 @@ func NewControlPlane(
 	// Bind to dae0 and dae0peer
 	if err = core.bindDaens(); err != nil {
 		return nil, oops.Errorf("bindDaens: %w", err)
-	}
-
-	if global.CommandPort != 0 {
-		plane.commandServer = &http.Server{Addr: fmt.Sprintf(":%d", global.CommandPort), Handler: plane}
-		go plane.commandServer.ListenAndServe()
 	}
 
 	return plane, nil
@@ -1167,7 +1161,6 @@ func (c *ControlPlane) Close() (err error) {
 			}
 		}
 	}
-	c.commandServer.Shutdown(context.Background())
 	c.cancel()
 	return c.core.Close()
 }

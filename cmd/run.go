@@ -57,7 +57,7 @@ var (
 	std              = log.New()
 	pprofServer      *http.Server
 	prometheusServer *http.Server
-	controlPlane     *control.ControlPlane
+	commandServer    *http.Server
 )
 
 func init() {
@@ -139,6 +139,7 @@ func Run(conf *config.Config, externGeoDataDirs []string) {
 	}
 
 	startPrometheusServer(conf.Global.MetricsPort, c.PrometheusRegistry)
+	startCommandServer(conf.Global.CommandPort, c)
 
 	// Serve tproxy TCP/UDP server util signals.
 	var listener *control.Listener
@@ -285,6 +286,7 @@ loop:
 
 				startPprofServer(conf.Global.PprofPort)
 				startPrometheusServer(conf.Global.MetricsPort, c.PrometheusRegistry)
+				startCommandServer(conf.Global.CommandPort, c)
 			case syscall.SIGHUP:
 				// Ignore.
 				continue
@@ -338,6 +340,20 @@ func startPrometheusServer(port uint16, prometheusRegistry *prometheus.Registry)
 
 	prometheusServer = &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: promhttp.HandlerFor(prometheusRegistry, promhttp.HandlerOpts{})}
 	go prometheusServer.ListenAndServe()
+}
+
+func startCommandServer(port uint16, handler http.Handler) {
+	if commandServer != nil {
+		commandServer.Shutdown(context.Background())
+		commandServer = nil
+	}
+
+	if port == 0 {
+		return
+	}
+
+	commandServer = &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: handler}
+	go commandServer.ListenAndServe()
 }
 
 func newControlPlane(bpf interface{}, conf *config.Config, externGeoDataDirs []string) (c *control.ControlPlane, err error) {
