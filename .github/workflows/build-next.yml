@@ -12,6 +12,7 @@
 name: Build (Next)
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - next
