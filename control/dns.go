@@ -225,7 +225,9 @@ func (d *DoTCP) ForwardDNS(msg *dnsmessage.Msg) error {
 
 func (d *DoTCP) Close() error {
 	if d.dnsManager != nil {
-		return d.dnsManager.Close()
+		err := d.dnsManager.Close()
+		d.dnsManager = nil
+		return err
 	}
 	return nil
 }
@@ -251,7 +253,9 @@ func (d *DoUDP) ForwardDNS(msg *dnsmessage.Msg) error {
 
 func (d *DoUDP) Close() error {
 	if d.dnsManager != nil {
-		return d.dnsManager.Close()
+		err := d.dnsManager.Close()
+		d.dnsManager = nil
+		return err
 	}
 	return nil
 }
