@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/common/netutils"
@@ -206,11 +207,15 @@ func (d *DoTLS) ForwardDNS(msg *dnsmessage.Msg) error {
 type DoTCP struct {
 	dns.Upstream
 	dialArgument dialArgument
+	mu           sync.Mutex
 	dnsManager   *DnsManager
 }
 
 // TODO: Connection reuse
 func (d *DoTCP) ForwardDNS(msg *dnsmessage.Msg) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if d.dnsManager == nil || d.dnsManager.IsClosed() {
 		ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 		defer cancel()
@@ -224,6 +229,9 @@ func (d *DoTCP) ForwardDNS(msg *dnsmessage.Msg) error {
 }
 
 func (d *DoTCP) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if d.dnsManager != nil {
 		err := d.dnsManager.Close()
 		d.dnsManager = nil
@@ -235,10 +243,14 @@ func (d *DoTCP) Close() error {
 type DoUDP struct {
 	dns.Upstream
 	dialArgument dialArgument
+	mu           sync.Mutex
 	dnsManager   *DnsManager
 }
 
 func (d *DoUDP) ForwardDNS(msg *dnsmessage.Msg) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if d.dnsManager == nil || d.dnsManager.IsClosed() {
 		ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 		defer cancel()
@@ -252,6 +264,9 @@ func (d *DoUDP) ForwardDNS(msg *dnsmessage.Msg) error {
 }
 
 func (d *DoUDP) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if d.dnsManager != nil {
 		err := d.dnsManager.Close()
 		d.dnsManager = nil
