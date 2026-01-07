@@ -223,6 +223,13 @@ func (d *DoTCP) ForwardDNS(msg *dnsmessage.Msg) error {
 	return d.dnsManager.Resolve(msg)
 }
 
+func (d *DoTCP) Close() error {
+	if d.dnsManager != nil {
+		return d.dnsManager.Close()
+	}
+	return nil
+}
+
 type DoUDP struct {
 	dns.Upstream
 	dialArgument dialArgument
@@ -240,4 +247,11 @@ func (d *DoUDP) ForwardDNS(msg *dnsmessage.Msg) error {
 		d.dnsManager = NewDnsManager(conn, false)
 	}
 	return d.dnsManager.Resolve(msg)
+}
+
+func (d *DoUDP) Close() error {
+	if d.dnsManager != nil {
+		return d.dnsManager.Close()
+	}
+	return nil
 }
