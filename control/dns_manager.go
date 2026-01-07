@@ -34,7 +34,10 @@ func NewDnsManager(conn net.Conn, stream bool) *DnsManager {
 	}
 	go func() {
 		if err := m.run(); err != nil {
-			log.WithError(err).Error("DNS manager recv loop exited")
+			// Only log the error if the manager wasn't intentionally closed
+			if m.ctx.Err() == nil {
+				log.WithError(err).Error("DNS manager recv loop exited")
+			}
 		}
 	}()
 	return m
