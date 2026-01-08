@@ -208,7 +208,8 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	}
 
 	if dnsMessage.Response {
-		log.Errorln("DNS request expected but DNS response received")
+		log.Errorln("DNS request expected but DNS response received from client")
+		return
 	}
 
 	queryInfo := c.prepareQueryInfo(dnsMessage)
@@ -613,9 +614,11 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 	}).Debugf("Got DNS response")
 
 	// TODO: 细分日志
+	if !msg.Response {
+		return oops.Errorf("DNS response expected but DNS request received from upstream")
+	}
 	switch {
-	case !msg.Response,
-		len(msg.Question) == 0,               // Check healthy resp.
+	case len(msg.Question) == 0, // Check healthy resp.
 		msg.Rcode != dnsmessage.RcodeSuccess: // Check suc resp.
 		log.WithFields(log.Fields{
 			"qname": queryInfo.qname,
