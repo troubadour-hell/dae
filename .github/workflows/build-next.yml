@@ -37,7 +37,7 @@ jobs:
     secrets: inherit
 
   build:
-    uses: daeuniverse/dae/.github/workflows/seed-build.yml@next
+    uses: daeuniverse/dae/.github/workflows/seed-build.yml@main
     with:
       ref: ${{ github.sha }}
       build-type: main-build
