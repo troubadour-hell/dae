@@ -215,7 +215,7 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 				err = c.handleDNSRequest(dnsMessage, req, queryInfo)
 			} else {
 				// Try to make both A and AAAA lookups.
-				dnsMessage2 := deepcopy.Copy(dnsMessage).(*dnsmessage.Msg)
+				dnsMessage2 := dnsMessage.Copy()
 				dnsMessage2.Id = uint16(fastrand.Intn(math.MaxUint16))
 				switch queryInfo.qtype {
 				case dnsmessage.TypeA:
@@ -310,7 +310,7 @@ func (c *DnsController) handleDNSRequest(
 	if skipResponseSelect {
 		reqMsg = dnsMessage
 	} else {
-		reqMsg = deepcopy.Copy(dnsMessage).(*dnsmessage.Msg)
+		reqMsg = dnsMessage.Copy()
 	}
 Dial:
 	for invokingDepth := 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
@@ -394,7 +394,7 @@ Dial:
 			}).Debugln("Change DNS upstream and resend")
 		}
 		upstream = nextUpstream
-		*dnsMessage = *reqMsg
+		*dnsMessage = *reqMsg.Copy()
 	}
 	// TODO: dial_mode: domain 的逻辑失效问题
 	// TODO: 我们现在缓存了它, 但并不响应缓存, 这是一个workround, 会导致污染其他非AsIs的查询

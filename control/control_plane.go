@@ -977,9 +977,6 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 			src = common.ConvergeAddrPort(src)
 			dst = common.ConvergeAddrPort(dst)
 
-			data := pool.GetBuffer(n)
-			copy(data, buf[:n])
-
 			/// Handle DNS
 			// To keep consistency with kernel program, we only sniff DNS request sent to 53.
 			if dst.Port() == 53 {
@@ -990,7 +987,7 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 				}
 				if routingResult.Must == 0 {
 					var dnsMessage dnsmessage.Msg
-					if err := dnsMessage.Unpack(data); err == nil {
+					if err := dnsMessage.Unpack(buf[:n]); err == nil {
 						c.dnsController.Handle(&dnsMessage, &dnsRequest{
 							src:           src,
 							dst:           dst,
@@ -1000,6 +997,9 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 					}
 				}
 			}
+
+			data := pool.GetBuffer(n)
+			copy(data, buf[:n])
 
 			// Debug:
 			// t := time.Now()
