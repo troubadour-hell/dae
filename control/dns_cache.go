@@ -12,7 +12,6 @@ import (
 
 	"github.com/daeuniverse/dae/common"
 	dnsmessage "github.com/miekg/dns"
-	"github.com/mohae/deepcopy"
 )
 
 type DnsCache struct {
@@ -42,8 +41,8 @@ func GetIp(rr dnsmessage.RR) (netip.Addr, bool) {
 func FillInto(msg *dnsmessage.Msg, caches []*DnsCache) {
 	for _, cache := range caches {
 		if cache.Deadline.After(time.Now()) {
-			msg.Answer = append(msg.Answer, deepcopy.Copy(cache.Answer).(dnsmessage.RR))
-			msg.Answer[len(msg.Answer)-1].Header().Ttl = uint32(time.Until(cache.Deadline).Seconds())
+			cache.Answer.Header().Ttl = uint32(time.Until(cache.Deadline).Seconds())
+			msg.Answer = append(msg.Answer, cache.Answer)
 		}
 	}
 	msg.Rcode = dnsmessage.RcodeSuccess

@@ -25,7 +25,6 @@ import (
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
-	"github.com/mohae/deepcopy"
 	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
@@ -123,26 +122,14 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 	}, nil
 }
 
-func (c *DnsController) NormalizeDnsResp(answers []dnsmessage.RR) (ttl int) {
-	// Get TTL.
+func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, fqdn string, answers []dnsmessage.RR) {
+	ttl := 0
 	for _, ans := range answers {
 		if ttl == 0 {
 			ttl = int(ans.Header().Ttl)
 			break
 		}
 	}
-
-	// Set TTL = zero. This requests applications must resend every request.
-	// However, it may be not defined in the standard.
-	for i := range answers {
-		answers[i].Header().Ttl = 0
-	}
-	return
-}
-
-func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, fqdn string, answers []dnsmessage.RR) {
-	answers = deepcopy.Copy(answers).([]dnsmessage.RR)
-	ttl := c.NormalizeDnsResp(answers)
 	if fixedTtl, ok := c.fixedDomainTtl[fqdn]; ok {
 		ttl = fixedTtl
 	}
