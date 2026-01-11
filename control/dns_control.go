@@ -192,6 +192,8 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 
 	queryInfo := c.prepareQueryInfo(dnsMessage)
 	id := dnsMessage.Id
+	// Avoids duplicated id from clients, so make the id unique.
+	dnsMessage.Id = uint16(fastrand.Intn(math.MaxUint16))
 
 	go func() {
 		var err error
@@ -248,7 +250,6 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 		if data, err := dnsMessage.PackBuffer(buf); err != nil {
 			log.Errorf("%+v", oops.Wrapf(err, "failed to pack dns message"))
 		} else if err = sendPkt(data, req.dst, req.src); err != nil {
-
 			log.Warningf("%+v", oops.Wrapf(err, "failed to send dns message back"))
 		}
 	}()
