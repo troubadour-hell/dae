@@ -154,7 +154,7 @@ func (m *DnsManager) Resolve(msg *dnsmessage.Msg) error {
 	case <-m.ctx.Done():
 		return net.ErrClosed
 	case <-ctx.Done():
-		return net.ErrClosed
+		return context.DeadlineExceeded
 	case err := <-errCh:
 		return err
 	case recvMsg := <-recvCh:

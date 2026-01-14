@@ -329,7 +329,7 @@ Dial:
 				With("Outbound", dialArgument.Outbound.Name).
 				With("Dialer", dialArgument.Dialer.Name).
 				Wrapf(err, "DNS dialSend error")
-			if !ok {
+			if !ok || !dnsMessage.Response {
 				return err
 			} else if !netErr.Timeout() {
 				if dialArgument.Dialer.NeedAliveState() {
@@ -525,13 +525,11 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 	// get forwarder from cache
 	key := dnsForwarderKey{upstream: upstream.String(), dialArgument: *dialArgument}
 	var cacheKey *dnsCacheKey
-	isNew := true
 	// Only cache answers for non-as-is upstreams. This assumes the "asis" upstream has its own cache mechanism.
 	if !upstream.IsAsIs && c.enableCache {
 		cacheKey = &dnsCacheKey{queryInfo: queryInfo, outbound: dialArgument.Outbound}
 		// No parallel for the same lookup.
-		l, n := c.dnsKeyLocker.Lock(*cacheKey)
-		isNew = n
+		l, _ := c.dnsKeyLocker.Lock(*cacheKey)
 		defer c.dnsKeyLocker.Unlock(*cacheKey, l)
 	}
 	var forwarder DnsForwarder
@@ -554,12 +552,6 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 					common.DnsCacheHit.With(labels).Inc()
 					return nil
 				}
-			}
-			if !isNew {
-				if log.IsLevelEnabled(log.DebugLevel) {
-					log.Debugf("UDP(DNS) <-> Drop failed duplicate lookup: %v %v", queryInfo.qname, queryInfo.qtype)
-				}
-				return nil
 			}
 		}
 		forwarder = value.(DnsForwarder)
@@ -587,9 +579,11 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 	}).Debugf("Got DNS response")
 
 	// TODO: 细分日志
+	if !msg.Response {
+		return oops.Errorf("DNS message response flag is unset")
+	}
 	switch {
-	case !msg.Response,
-		len(msg.Question) == 0,               // Check healthy resp.
+	case len(msg.Question) == 0, // Check healthy resp.
 		msg.Rcode != dnsmessage.RcodeSuccess: // Check suc resp.
 		log.WithFields(log.Fields{
 			"qname": queryInfo.qname,
