@@ -154,6 +154,10 @@ func (s *Dns) ResponseSelect(msg *dnsmessage.Msg, fromUpstream *Upstream) (upstr
 		return 0, nil, fmt.Errorf("DNS response expected but DNS request received")
 	}
 
+	if !s.hasResponseRules {
+		return consts.DnsResponseOutboundIndex_Accept, nil, nil
+	}
+
 	// Prepare routing.
 	var qname string
 	var qtype uint16

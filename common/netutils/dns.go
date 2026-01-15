@@ -27,7 +27,8 @@ import (
 )
 
 var (
-	ErrBadDnsAns = fmt.Errorf("bad dns answer")
+	ErrBadDnsAns  = fmt.Errorf("bad dns answer")
+	ErrNoIpRecord = fmt.Errorf("no ip record found")
 )
 
 func ResolveHttp(client *http.Client, url *url.URL, msg *dnsmessage.Msg) error {
@@ -120,6 +121,9 @@ func ResolveUDP(conn net.Conn, msg *dnsmessage.Msg) error {
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 
+	timer := time.NewTimer(consts.DefaultDNSRetryInterval)
+	defer timer.Stop()
+
 	sendCh := make(chan error, 1)
 	recvCh := make(chan error, 1)
 	go func() {
@@ -129,10 +133,13 @@ func ResolveUDP(conn net.Conn, msg *dnsmessage.Msg) error {
 				sendCh <- err
 				return
 			}
+			if i > 0 {
+				timer.Reset(consts.DefaultDNSRetryInterval)
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(consts.DefaultDNSRetryInterval):
+			case <-timer.C:
 			}
 		}
 	}()
@@ -229,6 +236,19 @@ func ResolveSOA(d netproxy.Dialer, dns netip.AddrPort, host string, network stri
 		records = append(records, ns.Ns)
 	}
 	return records, nil
+}
+
+func DnsCheck(dialer netproxy.Dialer, dns netip.AddrPort, network string) (ok bool, err error) {
+	resources, err := resolve(dialer, dns, consts.UdpCheckLookupHost, dnsmessage.TypeA, network)
+	if err != nil {
+		return false, err
+	}
+	for _, ans := range resources {
+		if ans.Header().Rrtype == dnsmessage.TypeA {
+			return true, nil
+		}
+	}
+	return false, ErrNoIpRecord
 }
 
 func resolve(dialer netproxy.Dialer, server netip.AddrPort, host string, typ uint16, network string) (ans []dnsmessage.RR, err error) {

@@ -37,7 +37,8 @@ func readDnsMsg(r io.Reader) (*dnsmessage.Msg, error) {
 	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
 		return nil, err
 	}
-	m := make([]byte, length)
+	m := pool.GetBuffer(int(length))
+	defer pool.PutBuffer(m)
 	if _, err := io.ReadFull(r, m); err != nil {
 		return nil, err
 	}

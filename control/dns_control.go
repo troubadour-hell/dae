@@ -240,7 +240,8 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 			if !ok || !netErr.Temporary() {
 				log.Warningf("%+v", err)
 			}
-			return
+			dnsMessage.Rcode = dnsmessage.RcodeServerFailure
+			dnsMessage.Response = true
 		}
 		// Keep the id the same with request.
 		dnsMessage.Id = id
@@ -293,9 +294,8 @@ func (c *DnsController) handleDNSRequest(
 	}
 
 	// Dial and re-route
-	skipResponseSelect := !c.routing.HasResponseRules()
 	var reqMsg *dnsmessage.Msg
-	if skipResponseSelect {
+	if !c.routing.HasResponseRules() {
 		reqMsg = dnsMessage
 	} else {
 		reqMsg = dnsMessage.Copy()
@@ -346,11 +346,6 @@ Dial:
 			}
 		}
 
-		if skipResponseSelect {
-			c.logDnsResponse(req, dialArgument, queryInfo, true)
-			break Dial
-		}
-
 		// Route response.
 		ResponseIndex, nextUpstream, err := c.routing.ResponseSelect(dnsMessage, upstream)
 		if err != nil {
@@ -382,7 +377,7 @@ Dial:
 			}).Debugln("Change DNS upstream and resend")
 		}
 		upstream = nextUpstream
-		*dnsMessage = *reqMsg.Copy()
+		reqMsg.CopyTo(dnsMessage)
 	}
 	// TODO: dial_mode: domain 的逻辑失效问题
 	// TODO: 我们现在缓存了它, 但并不响应缓存, 这是一个workround, 会导致污染其他非AsIs的查询

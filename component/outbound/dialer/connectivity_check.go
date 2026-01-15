@@ -25,7 +25,6 @@ import (
 	"github.com/daeuniverse/dae/common/netutils"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
-	dnsmessage "github.com/miekg/dns"
 	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
@@ -242,7 +241,7 @@ func (d *Dialer) createDnsCheckFunc(ipVersion consts.IpVersionStr, network strin
 			return false, nil
 		}
 
-		return d.DnsCheck(netip.AddrPortFrom(ip, opt.DnsPort), network)
+		return netutils.DnsCheck(d.Dialer, netip.AddrPortFrom(ip, opt.DnsPort), network)
 	}
 }
 
@@ -556,15 +555,4 @@ func (d *Dialer) HttpCheck(u *netutils.URL, ip netip.Addr, method string, networ
 		}
 		return true, nil
 	}
-}
-
-func (d *Dialer) DnsCheck(dns netip.AddrPort, network string) (ok bool, err error) {
-	addrs, err := netutils.ResolveNetip(d.Dialer, dns, consts.UdpCheckLookupHost, dnsmessage.TypeA, network)
-	if err != nil {
-		return false, err
-	}
-	if len(addrs) == 0 {
-		return false, oops.Errorf("bad DNS response: no record")
-	}
-	return true, nil
 }
