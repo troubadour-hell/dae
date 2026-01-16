@@ -68,7 +68,9 @@ func (c *ControlPlane) handleTcpDns(
 	lConn net.Conn, src, dst netip.AddrPort, routingResult *bpfRoutingResult) error {
 	msg, err := readDnsMsg(lConn)
 	if err != nil {
-		return oops.Wrapf(err, "failed to read tcp dns request")
+		log.Debugf("failed to read tcp dns request: %v", err)
+		// It's common to get EOF when reading tcp dns request.
+		return nil
 	}
 	req := &dnsRequest{
 		src:           src,
@@ -79,7 +81,7 @@ func (c *ControlPlane) handleTcpDns(
 	queryInfo := c.dnsController.prepareQueryInfo(msg)
 	if err = c.dnsController.handleDNSRequest(msg, req, queryInfo); err != nil {
 		log.Errorf("Failed to handle tcp dns request: %v", err)
-		msg = new(dnsmessage.Msg)
+		msg.Response = true
 		msg.SetRcode(msg, dnsmessage.RcodeServerFailure)
 	}
 	if err = writeDnsMsg(msg, lConn); err != nil {
