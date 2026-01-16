@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/daeuniverse/dae/common/consts"
+	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
 	"github.com/samber/oops"
@@ -88,6 +90,7 @@ func (m *DnsManager) feed(data []byte) {
 	}
 	conn, ok := m.recvMap.Load(msg.Id)
 	if !ok {
+		log.Warnf("Unknown dns resp msg, id: %v", msg.Id)
 		// Ignore message from unknown session
 		return
 	}
@@ -96,6 +99,7 @@ func (m *DnsManager) feed(data []byte) {
 	case conn.(chan *dnsmessage.Msg) <- &msg:
 		// OK
 	default:
+		log.Warnf("Drop dns resp msg, id: %v", msg.Id)
 		// Channel full, drop the message
 	}
 }
@@ -110,6 +114,9 @@ func (m *DnsManager) IsClosed() bool {
 }
 
 func (m *DnsManager) Resolve(msg *dnsmessage.Msg) error {
+	origMsgId := msg.Id
+	msg.Id = uint16(fastrand.Intn(math.MaxUint16))
+	defer func() { msg.Id = origMsgId }()
 	buf := pool.GetBuffer(1024)
 	defer pool.PutBuffer(buf)
 	var data []byte
@@ -150,10 +157,13 @@ func (m *DnsManager) Resolve(msg *dnsmessage.Msg) error {
 		case <-timer.C:
 		}
 	}
+
+	var qname string
+	var qtype uint16
 	if len(msg.Question) > 0 {
-		log.Warnf("dns timeout, qname: %s, qtype: %v", msg.Question[0].Name, msg.Question[0].Qtype)
-	} else {
-		log.Warnf("dns timeout, msg: %v", msg)
+		qname = msg.Question[0].Name
+		qtype = msg.Question[0].Qtype
 	}
+	log.Warnf("dns timeout, qname: %v, qtype: %v", qname, qtype)
 	return context.DeadlineExceeded
 }
