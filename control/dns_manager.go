@@ -36,7 +36,7 @@ func NewDnsManager(conn net.Conn, stream bool) *DnsManager {
 	}
 	go func() {
 		if err := m.run(); err != nil {
-			log.WithError(err).Error("DNS manager recv loop exited")
+			log.WithError(err).Errorf("DNS manager recv loop exited, stream: %v", stream)
 		}
 	}()
 	return m
@@ -85,12 +85,12 @@ func (m *DnsManager) feed(data []byte) {
 	var msg dnsmessage.Msg
 	err := msg.Unpack(data)
 	if err != nil {
-		log.Warnf("Failed to unpack dns resp, err: %v, data: %v", err, data)
+		log.Warnf("Failed to unpack dns resp, stream: %v, err: %v, data: %v", m.stream, err, data)
 		return
 	}
 	conn, ok := m.recvMap.Load(msg.Id)
 	if !ok {
-		log.Warnf("Unknown dns resp msg, id: %v", msg.Id)
+		log.Warnf("Unknown dns resp msg, stream: %v, id: %v", m.stream, msg.Id)
 		// Ignore message from unknown session
 		return
 	}
@@ -99,7 +99,7 @@ func (m *DnsManager) feed(data []byte) {
 	case conn.(chan *dnsmessage.Msg) <- &msg:
 		// OK
 	default:
-		log.Warnf("Drop dns resp msg, id: %v", msg.Id)
+		log.Warnf("Drop dns resp msg, stream: %v, id: %v", m.stream, msg.Id)
 		// Channel full, drop the message
 	}
 }
@@ -164,6 +164,6 @@ func (m *DnsManager) Resolve(msg *dnsmessage.Msg) error {
 		qname = msg.Question[0].Name
 		qtype = msg.Question[0].Qtype
 	}
-	log.Warnf("dns timeout, qname: %v, qtype: %v", qname, qtype)
+	log.Warnf("dns timeout, stream: %v, qname: %v, qtype: %v", m.stream, qname, qtype)
 	return context.DeadlineExceeded
 }

@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync/atomic"
+	"time"
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/common/netutils"
@@ -19,6 +21,7 @@ import (
 	"github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
 	dnsmessage "github.com/miekg/dns"
+	log "github.com/sirupsen/logrus"
 )
 
 // TODO: Connection reuse
@@ -28,11 +31,18 @@ type DnsForwarder interface {
 
 func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForwarder, error) {
 	forwarder, err := func() (DnsForwarder, error) {
+		if upstream.Scheme == dns.UpstreamScheme_TCP_UDP {
+			// Despite of the network of dialArgument, always use both tcp and udp.
+			// The DnsManager will try both and could fallback to tcp if udp is failed for N times.
+			doTcp := &DoTcpOrUdp{dialArgument: dialArgument, network: "tcp"}
+			doUdp := &DoTcpOrUdp{dialArgument: dialArgument, network: "udp"}
+			return &DoTcpAndUdp{doTcp: doTcp, doUdp: doUdp, udpMaxFails: 10, reviveAfter: 5 * time.Minute}, nil
+		}
 		switch dialArgument.networkType.L4Proto {
 		case consts.L4ProtoStr_TCP:
 			switch upstream.Scheme {
 			case dns.UpstreamScheme_TCP, dns.UpstreamScheme_TCP_UDP:
-				return &DoTCP{Upstream: *upstream, dialArgument: dialArgument}, nil
+				return &DoTcpOrUdp{dialArgument: dialArgument, network: "tcp"}, nil
 			case dns.UpstreamScheme_TLS:
 				return &DoTLS{Upstream: *upstream, dialArgument: dialArgument}, nil
 			case dns.UpstreamScheme_HTTPS:
@@ -43,7 +53,7 @@ func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForw
 		case consts.L4ProtoStr_UDP:
 			switch upstream.Scheme {
 			case dns.UpstreamScheme_UDP, dns.UpstreamScheme_TCP_UDP:
-				return &DoUDP{Upstream: *upstream, dialArgument: dialArgument}, nil
+				return &DoTcpOrUdp{dialArgument: dialArgument, network: "udp"}, nil
 			case dns.UpstreamScheme_QUIC:
 				return &DoQ{Upstream: *upstream, dialArgument: dialArgument}, nil
 			case dns.UpstreamScheme_H3:
@@ -203,41 +213,105 @@ func (d *DoTLS) ForwardDNS(msg *dnsmessage.Msg) error {
 	return netutils.ResolveStream(conn, msg, false)
 }
 
-type DoTCP struct {
-	dns.Upstream
+type DoTcpOrUdp struct {
 	dialArgument dialArgument
 	dnsManager   *DnsManager
+	network      string // "tcp" or "udp"
 }
 
 // TODO: Connection reuse
-func (d *DoTCP) ForwardDNS(msg *dnsmessage.Msg) error {
+func (d *DoTcpOrUdp) ForwardDNS(msg *dnsmessage.Msg) error {
 	if d.dnsManager == nil || d.dnsManager.IsClosed() {
 		ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 		defer cancel()
-		conn, err := d.dialArgument.Dialer.DialContext(ctx, "tcp", d.dialArgument.Target.String())
+		conn, err := d.dialArgument.Dialer.DialContext(ctx, d.network, d.dialArgument.Target.String())
 		if err != nil {
 			return err
 		}
-		d.dnsManager = NewDnsManager(conn, true)
+		d.dnsManager = NewDnsManager(conn, d.network == "tcp")
 	}
 	return d.dnsManager.Resolve(msg)
 }
 
-type DoUDP struct {
-	dns.Upstream
-	dialArgument dialArgument
-	dnsManager   *DnsManager
+type DoTcpAndUdp struct {
+	doTcp *DoTcpOrUdp
+	doUdp *DoTcpOrUdp
+
+	udpFails   int32
+	reviveTime int64
+
+	udpMaxFails int32
+	reviveAfter time.Duration
 }
 
-func (d *DoUDP) ForwardDNS(msg *dnsmessage.Msg) error {
-	if d.dnsManager == nil || d.dnsManager.IsClosed() {
-		ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
-		defer cancel()
-		conn, err := d.dialArgument.Dialer.DialContext(ctx, "udp", d.dialArgument.Target.String())
-		if err != nil {
-			return err
+type dnsResult struct {
+	msg *dnsmessage.Msg
+	err error
+}
+
+func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
+	canUseUdp := true
+	now := time.Now().Unix()
+	rt := atomic.LoadInt64(&d.reviveTime)
+	if rt != 0 {
+		if now < rt {
+			canUseUdp = false
+		} else {
+			d.reviveUdp()
 		}
-		d.dnsManager = NewDnsManager(conn, false)
 	}
-	return d.dnsManager.Resolve(msg)
+
+	n := 1
+	if canUseUdp {
+		n = 2
+	}
+	resCh := make(chan dnsResult, n)
+
+	go func() {
+		m := msg.Copy()
+		resCh <- dnsResult{m, d.doTcp.ForwardDNS(m)}
+	}()
+
+	if canUseUdp {
+		go func() {
+			m := msg.Copy()
+			var e error
+			if e = d.doUdp.ForwardDNS(m); e != nil {
+				d.maybePreventUdp()
+			} else {
+				d.reviveUdp()
+			}
+			resCh <- dnsResult{m, e}
+		}()
+	}
+
+	var firstErr error
+	for i := 0; i < n; i++ {
+		res := <-resCh
+		if res.err == nil {
+			res.msg.CopyTo(msg)
+			return nil
+		}
+		firstErr = res.err
+	}
+
+	return firstErr
+}
+
+func (d *DoTcpAndUdp) maybePreventUdp() {
+	if fails := atomic.AddInt32(&d.udpFails, 1); fails >= d.udpMaxFails {
+		log.Warnf("Prevent udp dns after consecutive %d failures", fails)
+		expire := time.Now().Add(d.reviveAfter).Unix()
+		atomic.StoreInt64(&d.reviveTime, expire)
+	}
+}
+
+func (d *DoTcpAndUdp) reviveUdp() {
+	if atomic.LoadInt64(&d.reviveTime) == 0 {
+		return
+	}
+	if atomic.SwapInt64(&d.reviveTime, 0) != 0 {
+		atomic.StoreInt32(&d.udpFails, 0)
+		log.Warnf("Udp dns revived!")
+	}
 }
