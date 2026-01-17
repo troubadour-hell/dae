@@ -221,16 +221,20 @@ type DoTcpOrUdp struct {
 
 // TODO: Connection reuse
 func (d *DoTcpOrUdp) ForwardDNS(msg *dnsmessage.Msg) error {
+	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
+	defer cancel()
+	return d.forwardDnsWithContext(ctx, msg)
+}
+
+func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, msg *dnsmessage.Msg) error {
 	if d.dnsManager == nil || d.dnsManager.IsClosed() {
-		ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
-		defer cancel()
 		conn, err := d.dialArgument.Dialer.DialContext(ctx, d.network, d.dialArgument.Target.String())
 		if err != nil {
 			return err
 		}
 		d.dnsManager = NewDnsManager(conn, d.network == "tcp")
 	}
-	return d.dnsManager.Resolve(msg)
+	return d.dnsManager.Resolve(ctx, msg)
 }
 
 type DoTcpAndUdp struct {
@@ -267,15 +271,19 @@ func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 	}
 	resCh := make(chan dnsResult, n)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	go func() {
 		m := msg.Copy()
-		resCh <- dnsResult{m, d.doTcp.ForwardDNS(m)}
+		resCh <- dnsResult{m, d.doTcp.forwardDnsWithContext(ctx, m)}
 	}()
 
 	if canUseUdp {
 		go func() {
 			m := msg.Copy()
 			var e error
+			// Note: don't give ctx here, avoid canceling udp to count udp timeouts as fails.
 			if e = d.doUdp.ForwardDNS(m); e != nil {
 				d.maybePreventUdp()
 			} else {
@@ -289,6 +297,8 @@ func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 	for i := 0; i < n; i++ {
 		res := <-resCh
 		if res.err == nil {
+			// cancel() only works for the tcp goroutine.
+			cancel()
 			res.msg.CopyTo(msg)
 			return nil
 		}
