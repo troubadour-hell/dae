@@ -24,6 +24,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const (
+	udpFailsToSuspend  = 10
+	reviveAfterTimeMin = 5 * time.Minute
+	reviveAfterTimeMax = 30 * time.Minute
+	reviveExtendRatio  = 3
+)
+
 // TODO: Connection reuse
 type DnsForwarder interface {
 	ForwardDNS(msg *dnsmessage.Msg) error
@@ -36,7 +43,7 @@ func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForw
 			// The DnsManager will try both and could fallback to tcp if udp is failed for N times.
 			doTcp := &DoTcpOrUdp{dialArgument: dialArgument, network: "tcp"}
 			doUdp := &DoTcpOrUdp{dialArgument: dialArgument, network: "udp"}
-			return &DoTcpAndUdp{doTcp: doTcp, doUdp: doUdp, udpMaxFails: 10, reviveAfter: 5 * time.Minute}, nil
+			return &DoTcpAndUdp{doTcp: doTcp, doUdp: doUdp}, nil
 		}
 		switch dialArgument.networkType.L4Proto {
 		case consts.L4ProtoStr_TCP:
@@ -241,11 +248,9 @@ type DoTcpAndUdp struct {
 	doTcp *DoTcpOrUdp
 	doUdp *DoTcpOrUdp
 
-	udpFails   int32
-	reviveTime int64
-
-	udpMaxFails int32
-	reviveAfter time.Duration
+	udpFails       int32
+	reviveTime     int64
+	lastReviveTime int64
 }
 
 type dnsResult struct {
@@ -262,7 +267,7 @@ func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 		if now < rt {
 			canUseUdp = false
 		} else {
-			d.reviveUdp()
+			d.maybeReviveUdp()
 		}
 	}
 
@@ -288,7 +293,7 @@ func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 			if e = d.doUdp.ForwardDNS(m); e != nil {
 				d.maybeSuspendUdp()
 			} else {
-				d.reviveUdp()
+				d.maybeReviveUdp()
 			}
 			resCh <- dnsResult{m, false, e}
 		}()
@@ -311,19 +316,22 @@ func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 }
 
 func (d *DoTcpAndUdp) maybeSuspendUdp() {
-	if fails := atomic.AddInt32(&d.udpFails, 1); fails >= d.udpMaxFails {
-		log.Warnf("udp dns suspended after %d consecutive failures", fails)
-		expire := time.Now().Add(d.reviveAfter).Unix()
-		atomic.StoreInt64(&d.reviveTime, expire)
+	if fails := atomic.AddInt32(&d.udpFails, 1); fails >= udpFailsToSuspend {
+		now := time.Now()
+		lrt := atomic.LoadInt64(&d.lastReviveTime)
+		stableDuration := now.Sub(time.Unix(lrt, 0))
+		reduction := time.Duration(int64(stableDuration) / reviveExtendRatio)
+		suspendDuration := max(reviveAfterTimeMin, reviveAfterTimeMax-reduction)
+		atomic.StoreInt64(&d.reviveTime, now.Add(suspendDuration).Unix())
+		log.Warnf("udp dns consecutive fails %v, suspend for %v, stable duration: %v", fails, suspendDuration, stableDuration)
 	}
 }
 
-func (d *DoTcpAndUdp) reviveUdp() {
-	if atomic.LoadInt64(&d.reviveTime) == 0 {
-		return
-	}
+func (d *DoTcpAndUdp) maybeReviveUdp() {
+	atomic.StoreInt32(&d.udpFails, 0)
 	if atomic.SwapInt64(&d.reviveTime, 0) != 0 {
 		atomic.StoreInt32(&d.udpFails, 0)
+		atomic.StoreInt64(&d.lastReviveTime, time.Now().Unix())
 		log.Warnf("Udp dns revived!")
 	}
 }
