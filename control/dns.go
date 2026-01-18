@@ -239,7 +239,7 @@ func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, msg *dnsmessage.
 		if err != nil {
 			return err
 		}
-		d.dnsManager = NewDnsManager(conn, d.network == "tcp")
+		d.dnsManager = NewDnsManager(conn, d.network == "tcp", d.dialArgument.Dialer.Name)
 	}
 	return d.dnsManager.Resolve(ctx, msg)
 }

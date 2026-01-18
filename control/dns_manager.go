@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"net"
@@ -22,6 +23,41 @@ const (
 	dnsRetryCount    = 2
 )
 
+type LeveledError interface {
+	error
+	Level() log.Level
+}
+
+type leveledError struct {
+	err   error
+	level log.Level
+}
+
+func (e *leveledError) Error() string {
+	return e.err.Error()
+}
+
+func (e *leveledError) Unwrap() error {
+	return e.err
+}
+
+func (e *leveledError) Level() log.Level {
+	return e.level
+}
+
+func wrapLevel(err error, level log.Level) error {
+	if err == nil {
+		return nil
+	}
+	return &leveledError{err: err, level: level}
+}
+
+func AsInfo(err error) error  { return wrapLevel(err, log.InfoLevel) }
+func AsWarn(err error) error  { return wrapLevel(err, log.WarnLevel) }
+func AsError(err error) error { return wrapLevel(err, log.ErrorLevel) }
+func AsDebug(err error) error { return wrapLevel(err, log.DebugLevel) }
+func AsTrace(err error) error { return wrapLevel(err, log.TraceLevel) }
+
 type DnsManager struct {
 	conn    net.Conn
 	recvMap sync.Map // map[uint32]chan *dnsmessage.Msg
@@ -29,15 +65,17 @@ type DnsManager struct {
 	cancel  context.CancelFunc
 
 	stream bool
+	dialer string
 }
 
-func NewDnsManager(conn net.Conn, stream bool) *DnsManager {
+func NewDnsManager(conn net.Conn, stream bool, dialer string) *DnsManager {
 	ctx, cancel := context.WithCancel(context.TODO())
 	m := &DnsManager{
 		conn:   conn,
 		ctx:    ctx,
 		cancel: cancel,
 		stream: stream,
+		dialer: dialer,
 	}
 	go m.run()
 	return m
@@ -48,8 +86,12 @@ func (m *DnsManager) run() {
 	defer pool.PutBuffer(buf)
 	for {
 		var data []byte
-		var ok bool
-		if data, ok = m.read(buf); !ok {
+		var err error
+		if data, err = m.read(buf); err != nil {
+			var le LeveledError
+			if errors.As(err, &le) {
+				log.WithError(err).Logf(le.Level(), "DnsManager closed, dialer: %v", m.dialer)
+			}
 			m.Close()
 			return
 		}
@@ -57,34 +99,29 @@ func (m *DnsManager) run() {
 	}
 }
 
-func (m *DnsManager) read(buf []byte) (data []byte, ok bool) {
-	var err error
+func (m *DnsManager) read(buf []byte) (data []byte, err error) {
 	if m.stream {
 		msgLenBuf := buf[:2]
 		// Read two byte length.
 		if _, err = io.ReadFull(m.conn, msgLenBuf); err != nil {
-			log.WithError(err).Infof("failed to read tcp DNS resp payload length")
-			return
+			return data, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload length"))
 		}
 		msgLen := int(binary.BigEndian.Uint16(msgLenBuf))
 		if msgLen > len(buf) {
-			log.WithError(err).Errorf("tcp dns msg len too large: %d > %d", msgLen, len(buf))
-			return
+			return data, AsWarn(oops.Wrapf(err, "tcp dns msg len too large: %d > %d", msgLen, len(buf)))
 		}
 		data = buf[:msgLen]
 		if _, err = io.ReadFull(m.conn, data); err != nil {
-			log.WithError(err).Infof("failed to read tcp DNS resp payload")
-			return
+			return data, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload"))
 		}
 	} else {
 		var n int
 		if n, err = m.conn.Read(buf); err != nil {
-			log.WithError(err).Errorf("failed to read udp DNS resp payload")
-			return
+			return data, AsError(oops.Wrapf(err, "failed to read udp DNS resp payload"))
 		}
 		data = buf[:n]
 	}
-	return data, true
+	return data, nil
 }
 
 func (m *DnsManager) feed(data []byte) {
