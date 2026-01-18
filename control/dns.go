@@ -250,6 +250,7 @@ type DoTcpAndUdp struct {
 
 type dnsResult struct {
 	msg *dnsmessage.Msg
+	tcp bool
 	err error
 }
 
@@ -276,7 +277,7 @@ func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 
 	go func() {
 		m := msg.Copy()
-		resCh <- dnsResult{m, d.doTcp.forwardDnsWithContext(ctx, m)}
+		resCh <- dnsResult{m, true, d.doTcp.forwardDnsWithContext(ctx, m)}
 	}()
 
 	if canUseUdp {
@@ -285,11 +286,11 @@ func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 			var e error
 			// Note: don't give ctx here, avoid canceling udp to count udp timeouts as fails.
 			if e = d.doUdp.ForwardDNS(m); e != nil {
-				d.maybePreventUdp()
+				d.maybeSuspendUdp()
 			} else {
 				d.reviveUdp()
 			}
-			resCh <- dnsResult{m, e}
+			resCh <- dnsResult{m, false, e}
 		}()
 	}
 
@@ -300,6 +301,7 @@ func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 			// cancel() only works for the tcp goroutine.
 			cancel()
 			res.msg.CopyTo(msg)
+			log.Debugf("tcp+udp dns resp, tcp: %v, qname: %s, qtype: %v", res.tcp, msg.Question[0].Name, msg.Question[0].Qtype)
 			return nil
 		}
 		firstErr = res.err
@@ -308,9 +310,9 @@ func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 	return firstErr
 }
 
-func (d *DoTcpAndUdp) maybePreventUdp() {
+func (d *DoTcpAndUdp) maybeSuspendUdp() {
 	if fails := atomic.AddInt32(&d.udpFails, 1); fails >= d.udpMaxFails {
-		log.Warnf("Prevent udp dns after consecutive %d failures", fails)
+		log.Warnf("udp dns suspended after %d consecutive failures", fails)
 		expire := time.Now().Add(d.reviveAfter).Unix()
 		atomic.StoreInt64(&d.reviveTime, expire)
 	}

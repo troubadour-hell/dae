@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/common/netutils"
 	"github.com/samber/oops"
@@ -121,26 +122,28 @@ func NewUpstream(ctx context.Context, upstream *url.URL, resolverNetwork string)
 	}, nil
 }
 
-func (u *Upstream) SupportedNetworks() (ipversions []consts.IpVersionStr, l4protos []consts.L4ProtoStr) {
-	if u.Ip4.IsValid() && u.Ip6.IsValid() {
-		ipversions = []consts.IpVersionStr{consts.IpVersionStr_4, consts.IpVersionStr_6}
-	} else {
-		if u.Ip4.IsValid() {
-			ipversions = []consts.IpVersionStr{consts.IpVersionStr_4}
-		} else {
-			ipversions = []consts.IpVersionStr{consts.IpVersionStr_6}
-		}
+func (u *Upstream) isUdpSupported() bool {
+	return u.Scheme == UpstreamScheme_UDP || u.Scheme == UpstreamScheme_TCP_UDP || u.Scheme == UpstreamScheme_QUIC || u.Scheme == UpstreamScheme_H3
+}
+
+func (u *Upstream) isTcpSupported() bool {
+	return u.Scheme == UpstreamScheme_TCP || u.Scheme == UpstreamScheme_TCP_UDP || u.Scheme == UpstreamScheme_HTTPS || u.Scheme == UpstreamScheme_TLS
+}
+
+func (u *Upstream) IsNetworkSupported(network *common.NetworkType) bool {
+	if network.IpVersion == consts.IpVersionStr_6 && !u.Ip6.IsValid() {
+		return false
 	}
-	switch u.Scheme {
-	case UpstreamScheme_TCP, UpstreamScheme_HTTPS, UpstreamScheme_TLS:
-		l4protos = []consts.L4ProtoStr{consts.L4ProtoStr_TCP}
-	case UpstreamScheme_UDP, UpstreamScheme_QUIC, UpstreamScheme_H3:
-		l4protos = []consts.L4ProtoStr{consts.L4ProtoStr_UDP}
-	case UpstreamScheme_TCP_UDP:
-		// UDP first.
-		l4protos = []consts.L4ProtoStr{consts.L4ProtoStr_UDP, consts.L4ProtoStr_TCP}
+	if network.IpVersion == consts.IpVersionStr_4 && !u.Ip4.IsValid() {
+		return false
 	}
-	return ipversions, l4protos
+	if network.L4Proto == consts.L4ProtoStr_UDP && !u.isUdpSupported() {
+		return false
+	}
+	if network.L4Proto == consts.L4ProtoStr_TCP && !u.isTcpSupported() {
+		return false
+	}
+	return true
 }
 
 func (u *Upstream) String() string {

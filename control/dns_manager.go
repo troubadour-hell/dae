@@ -17,6 +17,11 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const (
+	dnsRetryInterval = 1 * time.Second
+	dnsRetryCount    = 2
+)
+
 type DnsManager struct {
 	conn    net.Conn
 	recvMap sync.Map // map[uint32]chan *dnsmessage.Msg
@@ -139,15 +144,15 @@ func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
 	m.recvMap.Store(msg.Id, recvCh)
 	defer m.recvMap.Delete(msg.Id)
 
-	timer := time.NewTimer(consts.DefaultDNSRetryInterval)
+	timer := time.NewTimer(dnsRetryInterval)
 	defer timer.Stop()
 
-	for i := range consts.DefaultDNSRetryCount {
+	for i := range dnsRetryCount {
 		if _, err := m.conn.Write(data); err != nil {
 			return err
 		}
 		if i > 0 {
-			timer.Reset(consts.DefaultDNSRetryInterval)
+			timer.Reset(dnsRetryInterval)
 		}
 		select {
 		case <-m.ctx.Done():

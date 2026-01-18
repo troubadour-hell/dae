@@ -1054,13 +1054,19 @@ func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (liste
 	return listener, nil
 }
 
+var allNetworkTypes = []*common.NetworkType{
+	{L4Proto: consts.L4ProtoStr_UDP, IpVersion: consts.IpVersionStr_6},
+	{L4Proto: consts.L4ProtoStr_UDP, IpVersion: consts.IpVersionStr_4},
+	{L4Proto: consts.L4ProtoStr_TCP, IpVersion: consts.IpVersionStr_6},
+	{L4Proto: consts.L4ProtoStr_TCP, IpVersion: consts.IpVersionStr_4},
+}
+
 func (c *ControlPlane) chooseBestDnsDialer(
 	req *dnsRequest,
 	dnsUpstream *dns.Upstream,
 ) (*dialArgument, error) {
 	/// Choose the best l4proto+ipversion dialer, and change taregt DNS to the best ipversion DNS upstream for DNS request.
 	// Get available ipversions and l4protos for DNS upstream.
-	ipversions, l4protos := dnsUpstream.SupportedNetworks()
 	var (
 		l4proto      consts.L4ProtoStr
 		ipversion    consts.IpVersionStr
@@ -1069,47 +1075,49 @@ func (c *ControlPlane) chooseBestDnsDialer(
 		bestTarget   netip.AddrPort
 		// dialMark     uint32
 	)
-	var networkType common.NetworkType
 	// Get the min latency path.
-	for _, ver := range ipversions {
-		for _, proto := range l4protos {
-			networkType.L4Proto = proto
-			networkType.IpVersion = ver
-			var dAddr netip.Addr
-			switch ver {
-			case consts.IpVersionStr_4:
-				dAddr = dnsUpstream.Ip4
-			case consts.IpVersionStr_6:
-				dAddr = dnsUpstream.Ip6
-			default:
-				return nil, oops.Errorf("unexpected ipversion: %v", ver)
-			}
-			// TODO: Mark
-			outboundIndex, _, _, err := c.Route(req.src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
-			if err != nil {
-				return nil, err
-			}
-			if int(outboundIndex) >= len(c.outbounds) {
-				return nil, oops.Errorf("bad outbound index: %v", outboundIndex)
-			}
-			// Handles outbound redirects
-			if redirected, exists := c.outboundRedirects[outboundIndex]; exists {
-				outboundIndex = redirected
-			}
-			dialerGroup := c.outbounds[outboundIndex]
-			// DNS always dial IP.
-			d, err := dialerGroup.Select(&networkType)
-			if err != nil {
-				continue
-			}
-			bestDialer = d
-			bestOutbound = dialerGroup
-			l4proto = proto
-			ipversion = ver
-			// dialMark = mark
-			break
+	var networkType *common.NetworkType
+	for _, networkType = range allNetworkTypes {
+		if !dnsUpstream.IsNetworkSupported(networkType) {
+			continue
 		}
+		var dAddr netip.Addr
+		ver := networkType.IpVersion
+		proto := networkType.L4Proto
+		switch ver {
+		case consts.IpVersionStr_4:
+			dAddr = dnsUpstream.Ip4
+		case consts.IpVersionStr_6:
+			dAddr = dnsUpstream.Ip6
+		default:
+			return nil, oops.Errorf("unexpected ipversion: %v", ver)
+		}
+		// TODO: Mark
+		outboundIndex, _, _, err := c.Route(req.src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
+		if err != nil {
+			return nil, err
+		}
+		if int(outboundIndex) >= len(c.outbounds) {
+			return nil, oops.Errorf("bad outbound index: %v", outboundIndex)
+		}
+		// Handles outbound redirects
+		if redirected, exists := c.outboundRedirects[outboundIndex]; exists {
+			outboundIndex = redirected
+		}
+		dialerGroup := c.outbounds[outboundIndex]
+		// DNS always dial IP.
+		d, err := dialerGroup.Select(networkType)
+		if err != nil {
+			continue
+		}
+		bestDialer = d
+		bestOutbound = dialerGroup
+		l4proto = proto
+		ipversion = ver
+		// dialMark = mark
+		break
 	}
+
 	if bestDialer == nil {
 		return nil, oops.Errorf("no proper dialer for DNS upstream: %v", dnsUpstream.String())
 	}
@@ -1121,17 +1129,15 @@ func (c *ControlPlane) chooseBestDnsDialer(
 	}
 	if log.IsLevelEnabled(log.TraceLevel) {
 		log.WithFields(log.Fields{
-			"ipversions": ipversions,
-			"l4protos":   l4protos,
-			"upstream":   dnsUpstream.String(),
-			"choose":     string(l4proto) + "+" + string(ipversion),
-			"use":        bestTarget.String(),
-			"outbound":   bestOutbound.Name,
-			"dialer":     bestDialer.Name,
+			"upstream": dnsUpstream.String(),
+			"choose":   string(l4proto) + "+" + string(ipversion),
+			"use":      bestTarget.String(),
+			"outbound": bestOutbound.Name,
+			"dialer":   bestDialer.Name,
 		}).Traceln("Choose DNS path")
 	}
 	return &dialArgument{
-		networkType: networkType,
+		networkType: *networkType,
 		Dialer:      bestDialer,
 		Outbound:    bestOutbound,
 		Target:      bestTarget,
