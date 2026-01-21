@@ -71,6 +71,9 @@ func ResolveHttp(client *http.Client, url *url.URL, msg *dnsmessage.Msg) error {
 }
 
 func ResolveStream(stream io.ReadWriter, msg *dnsmessage.Msg, quic bool) error {
+	if d, ok := stream.(interface{ SetDeadline(time.Time) error }); ok {
+		d.SetDeadline(time.Now().Add(consts.DefaultDNSTimeout))
+	}
 	data, err := msg.Pack()
 	if err != nil {
 		return oops.Wrapf(err, "pack DNS packet")
