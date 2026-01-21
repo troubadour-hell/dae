@@ -125,7 +125,6 @@ func ResolveUDP(conn net.Conn, msg *dnsmessage.Msg) error {
 	defer timer.Stop()
 
 	sendCh := make(chan error, 1)
-	recvCh := make(chan error, 1)
 	go func() {
 		for i := 0; i < consts.DefaultDNSRetryCount; i++ {
 			_, err := conn.Write(data)
@@ -144,12 +143,14 @@ func ResolveUDP(conn net.Conn, msg *dnsmessage.Msg) error {
 		}
 	}()
 
-	respBuf := pool.GetBuffer(consts.EthernetMtu)
-	defer pool.PutBuffer(respBuf)
-	var n int
+	recvCh := make(chan error, 1)
 	go func() {
+		respBuf := pool.GetBuffer(consts.EthernetMtu)
+		defer pool.PutBuffer(respBuf)
 		// Wait for response.
-		n, err = conn.Read(respBuf)
+		if n, err := conn.Read(respBuf); err == nil {
+			msg.Unpack(respBuf[:n])
+		}
 		recvCh <- err
 	}()
 
@@ -157,12 +158,8 @@ func ResolveUDP(conn net.Conn, msg *dnsmessage.Msg) error {
 	case err := <-sendCh:
 		return err
 	case err := <-recvCh:
-		if err != nil {
-			return err
-		}
+		return err
 	}
-
-	return msg.Unpack(respBuf[:n])
 }
 
 func ResolveNetip(d netproxy.Dialer, dns netip.AddrPort, host string, typ uint16, network string) (addrs []netip.Addr, err error) {
