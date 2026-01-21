@@ -13,6 +13,7 @@ import (
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/routing"
+	"github.com/daeuniverse/dae/component/routing/domain_matcher"
 	"github.com/daeuniverse/dae/pkg/trie"
 )
 
@@ -49,6 +50,7 @@ func (m *RoutingMatcher) Match(
 	var domainMatchBitmap []uint32
 	if domain != "" {
 		domainMatchBitmap = m.domainMatcher.MatchDomainBitmap(domain)
+		defer domain_matcher.ReleaseBitmap(domainMatchBitmap)
 	}
 
 	goodSubrule := false

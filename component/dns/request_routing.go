@@ -168,6 +168,7 @@ func (m *RequestMatcher) Match(
 	var domainMatchBitmap []uint32
 	if qName != "" {
 		domainMatchBitmap = m.domainMatcher.MatchDomainBitmap(qName)
+		defer domain_matcher.ReleaseBitmap(domainMatchBitmap)
 	}
 
 	goodSubrule := false

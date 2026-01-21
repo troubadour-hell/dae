@@ -223,6 +223,7 @@ func (m *ResponseMatcher) Match(
 		return 0, fmt.Errorf("qName cannot be empty")
 	}
 	domainMatchBitmap := m.domainMatcher.MatchDomainBitmap(qName)
+	defer domain_matcher.ReleaseBitmap(domainMatchBitmap)
 	bin128 := make([]string, 0, len(ips))
 	for _, ip := range ips {
 		bin128 = append(bin128, trie.Prefix2bin128(netip.PrefixFrom(netip.AddrFrom16(ip.As16()), 128)))
