@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync" // Added sync import
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/pkg/trie"
@@ -17,6 +18,12 @@ import (
 )
 
 var ValidDomainChars = trie.NewValidChars([]byte("0123456789abcdefghijklmnopqrstuvwxyz-.^_"))
+
+var bitmapPool = sync.Pool{
+	New: func() any {
+		return make([]uint32, 128)
+	},
+}
 
 type AhocorasickSlimtrie struct {
 	validAcIndexes     []int
@@ -94,7 +101,15 @@ func (n *AhocorasickSlimtrie) MatchDomainBitmap(domain string) (bitmap []uint32)
 	if len(n.ac)%32 != 0 {
 		N++
 	}
-	bitmap = make([]uint32, N)
+	bitmapPtr := bitmapPool.Get().([]uint32)
+	if cap(bitmapPtr) < N {
+		bitmapPtr = make([]uint32, N)
+	}
+	bitmap = bitmapPtr[:N]
+	for i := range bitmap {
+		bitmap[i] = 0
+	}
+
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 	// Domain should consist of 'a'-'z' and '.' and '-'
 	// NOTE: DO NOT VERIFY THE DOMAIN TO MATCH: https://github.com/daeuniverse/dae/issues/528
@@ -140,6 +155,17 @@ func (n *AhocorasickSlimtrie) MatchDomainBitmap(domain string) (bitmap []uint32)
 		}
 	}
 	return bitmap
+}
+// ReleaseBitmap returns the bitmap to the pool.
+func ReleaseBitmap(bitmap []uint32) {
+	if bitmap == nil {
+		return
+	}
+	// Only pool buffers with the exact expected capacity (128) to avoid
+	// large buffer pollution. Oversized buffers are left for GC.
+	if cap(bitmap) == 128 {
+		bitmapPool.Put(bitmap[:128])
+	}
 }
 func ToSuffixTrieString(s string) string {
 	// No need for end char "$".
