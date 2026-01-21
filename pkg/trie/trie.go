@@ -299,16 +299,24 @@ func selectIthOne(bm []uint64, ranks, selects *bitlist.CompactBitList, i int) in
 	findIthOne := i - int(ranks.Get(base>>6))
 
 	for i := base >> 6; i < len(bm); i++ {
-		bitIdx := 0
-		for w := bm[i]; w > 0; {
-			findIthOne -= int(w & 1)
-			if findIthOne < 0 {
-				return i<<6 + bitIdx
-			}
-			t0 := bits.TrailingZeros64(w &^ 1)
-			w >>= uint(t0)
-			bitIdx += t0
+		w := bm[i]
+		c := bits.OnesCount64(w)
+		if findIthOne < c {
+			return i<<6 + select64(w, findIthOne)
 		}
+		findIthOne -= c
 	}
 	panic("no more ones")
+}
+
+// select64 returns the offset of the k-th (0-indexed) set bit in v.
+// k must be less than bits.OnesCount64(v).
+func select64(v uint64, k int) int {
+	// Use TrailingZeros64 (TZCNT on x86) to skip zeros efficiently.
+	// Complexity: O(k) where k is the target bit index, not O(64).
+	for k > 0 {
+		v &= v - 1 // Clear the lowest set bit
+		k--
+	}
+	return bits.TrailingZeros64(v)
 }
