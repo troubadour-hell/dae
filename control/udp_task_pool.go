@@ -13,95 +13,189 @@ import (
 )
 
 const UdpTaskQueueLength = 128
+const shardingCount = 128
+
+
+type Hasher[K comparable] func(K) uint32
 
 type UdpTask = func()
 
-// UdpTaskQueue make sure packets with the same key (4 tuples) will be sent in order.
 type UdpTaskQueue[K comparable] struct {
-	key       K
-	p         *UdpTaskPool[K]
+	key K
+	p   *UdpTaskPool[K]
+
+	// mu protects valid and ch usage between EmitTask and GC
+	mu    sync.RWMutex
+	valid bool
+
 	ch        chan UdpTask
 	timer     *time.Timer
 	agingTime time.Duration
 	ctx       context.Context
+	cancel    context.CancelFunc
 	closed    chan struct{}
 }
 
-// TODO: Timout?
 func (q *UdpTaskQueue[K]) convoy() {
+	defer close(q.closed)
 	for {
 		select {
 		case <-q.ctx.Done():
-			close(q.closed)
 			return
 		case task := <-q.ch:
 			task()
+			// Reset timer safely
+			if !q.timer.Stop() {
+				select {
+				case <-q.timer.C:
+				default:
+				}
+			}
 			q.timer.Reset(q.agingTime)
 		}
 	}
 }
 
-type UdpTaskPool[K comparable] struct {
-	queueChPool sync.Pool
-	// mu protects m
-	mu sync.Mutex
+type udpTaskPoolShard[K comparable] struct {
+	mu sync.RWMutex
 	m  map[K]*UdpTaskQueue[K]
 }
 
-func NewUdpTaskPool[K comparable]() *UdpTaskPool[K] {
+type UdpTaskPool[K comparable] struct {
+	queuePool sync.Pool
+	shards    [shardingCount]*udpTaskPoolShard[K]
+	hasher    Hasher[K]
+}
+
+func NewUdpTaskPool[K comparable](hasher Hasher[K]) *UdpTaskPool[K] {
 	p := &UdpTaskPool[K]{
-		queueChPool: sync.Pool{New: func() any {
-			return make(chan UdpTask, UdpTaskQueueLength)
+		queuePool: sync.Pool{New: func() any {
+			return &UdpTaskQueue[K]{
+				ch:     make(chan UdpTask, UdpTaskQueueLength),
+				closed: make(chan struct{}),
+			}
 		}},
-		m: make(map[K]*UdpTaskQueue[K]),
+		hasher: hasher,
+	}
+	for i := 0; i < shardingCount; i++ {
+		p.shards[i] = &udpTaskPoolShard[K]{
+			m: make(map[K]*UdpTaskQueue[K]),
+		}
 	}
 	return p
 }
 
 // EmitTask: Make sure packets with the same key (4 tuples) will be sent in order.
 func (p *UdpTaskPool[K]) EmitTask(key K, task UdpTask) {
-	p.mu.Lock()
-	q, ok := p.m[key]
-	if !ok {
-		ch := p.queueChPool.Get().(chan UdpTask)
-		ctx, cancel := context.WithCancel(context.Background())
-		q = &UdpTaskQueue[K]{
-			key:       key,
-			p:         p,
-			ch:        ch,
-			timer:     nil,
-			agingTime: DefaultNatTimeoutUDP,
-			ctx:       ctx,
-			closed:    make(chan struct{}),
-		}
-		q.timer = time.AfterFunc(q.agingTime, func() {
-			// if timer executed, there should no task in queue.
-			// q.closed should not blocking things.
-			p.mu.Lock()
-			cancel()
-			delete(p.m, key)
-			p.mu.Unlock()
-			<-q.closed
-			if len(ch) == 0 { // Otherwise let it to be gc
-				p.queueChPool.Put(ch)
+	h := p.hasher(key)
+	shard := p.shards[h%uint32(shardingCount)]
+
+	shard.mu.RLock()
+	q, ok := shard.m[key]
+	if ok {
+		// Fast path: try to lock queue safely
+		q.mu.RLock()
+		if q.valid {
+			select {
+			case q.ch <- task:
+				q.mu.RUnlock()
+				shard.mu.RUnlock()
+				return
+			default:
+				// Channel full
 			}
+		}
+		q.mu.RUnlock()
+	}
+	shard.mu.RUnlock()
+
+	// Slow path or retry
+	shard.mu.Lock()
+	// Double check
+	q, ok = shard.m[key]
+	if ok {
+		// Someone created it just now
+		q.mu.RLock()
+		if q.valid {
+			select {
+			case q.ch <- task:
+				q.mu.RUnlock()
+				shard.mu.Unlock()
+				return
+			default:
+			}
+		}
+		q.mu.RUnlock()
+	} else {
+		// Create new
+		q = p.queuePool.Get().(*UdpTaskQueue[K])
+		q.key = key
+		q.p = p
+		q.valid = true
+		q.agingTime = DefaultNatTimeoutUDP
+		// Reset closed channel if it was closed
+		select {
+		case <-q.closed:
+			q.closed = make(chan struct{})
+		default:
+		}
+		
+		q.ctx, q.cancel = context.WithCancel(context.Background())
+		
+		q.timer = time.AfterFunc(q.agingTime, func() {
+			shard.mu.Lock()
+			if shard.m[key] != q {
+				shard.mu.Unlock()
+				return
+			}
+			delete(shard.m, key)
+			shard.mu.Unlock()
+
+			// Mark invalid
+			q.mu.Lock()
+			q.valid = false
+			q.mu.Unlock()
+
+			q.cancel()
+			<-q.closed
+
+			// Drain channel before recycling
+			for len(q.ch) > 0 {
+				<-q.ch
+			}
+			p.queuePool.Put(q)
 		})
-		p.m[key] = q
+		shard.m[key] = q
 		go q.convoy()
+
+		// Send task to newly created queue (guaranteed to have space)
+		q.ch <- task
 	}
-	p.mu.Unlock()
-	// if task cannot be executed within 180s(DefaultNatTimeout), GC may be triggered, so skip the task when GC occurs
-	select {
-	case q.ch <- task:
-		// OK
-	default:
-		// Channel full, drop the packet
-	}
+	shard.mu.Unlock()
 }
 
-// 目前没有实现在遇到连接错误时将节点设置为不可用
-// 因此一旦节点失效，将必然最终导致队列拥塞，导致阻塞所有新连接
+
+
+func addrPortHash(k netip.AddrPort) uint32 {
+	addr := k.Addr()
+	// FNV-1a like hash for 16 bytes addr + 2 bytes port
+	// We can't access internal fields efficiently without allocation if we use Interface()
+	// But AddrPort is comparable.
+	// As16() returns [16]byte array
+	b16 := addr.As16()
+	var h uint32 = 2166136261
+	for _, b := range b16 {
+		h ^= uint32(b)
+		h *= 16777619
+	}
+	port := k.Port()
+	h ^= uint32(port >> 8)
+	h *= 16777619
+	h ^= uint32(port & 0xFF)
+	h *= 16777619
+	return h
+}
 
 var (
-	DefaultUdpTaskPool = NewUdpTaskPool[netip.AddrPort]()
+	DefaultUdpTaskPool = NewUdpTaskPool[netip.AddrPort](addrPortHash)
 )
