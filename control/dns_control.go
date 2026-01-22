@@ -520,8 +520,7 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 	// get forwarder from cache
 	key := dnsForwarderKey{upstream: upstream.String(), dialArgument: *dialArgument}
 	var cacheKey *dnsCacheKey
-	// Only cache answers for non-as-is upstreams. This assumes the "asis" upstream has its own cache mechanism.
-	if !upstream.IsAsIs && c.enableCache {
+	if c.enableCache {
 		cacheKey = &dnsCacheKey{queryInfo: queryInfo, outbound: dialArgument.Outbound}
 		// No parallel for the same lookup.
 		l, _ := c.dnsKeyLocker.Lock(*cacheKey)
