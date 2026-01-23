@@ -9,7 +9,6 @@ var (
 	CoreIpDomainBitmap prometheus.Gauge
 	DeadlineTimers     prometheus.Gauge
 	DnsCacheSize       prometheus.Gauge
-	DnsCacheHit        *prometheus.CounterVec
 	CheckLatency       *prometheus.GaugeVec
 	CheckMovingLatency *prometheus.GaugeVec
 	CheckSelectLatency *prometheus.GaugeVec
@@ -42,12 +41,6 @@ func InitPrometheus(registry *prometheus.Registry) {
 		prometheus.GaugeOpts{
 			Name: "dae_dns_cache_size",
 		},
-	)
-	DnsCacheHit = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "dae_dns_cache_hit",
-		},
-		[]string{"outbound", "qtype"},
 	)
 	CheckLatency = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -102,7 +95,6 @@ func InitPrometheus(registry *prometheus.Registry) {
 	registry.MustRegister(CoreIpDomainBitmap)
 	registry.MustRegister(DeadlineTimers)
 	registry.MustRegister(DnsCacheSize)
-	registry.MustRegister(DnsCacheHit)
 	registry.MustRegister(CheckLatency)
 	registry.MustRegister(CheckMovingLatency)
 	registry.MustRegister(CheckSelectLatency)
