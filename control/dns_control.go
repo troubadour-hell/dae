@@ -17,6 +17,7 @@ import (
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/netutils"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/dns"
@@ -75,12 +76,13 @@ type DnsController struct {
 	minSniffingTtl    time.Duration
 	enableCache       bool
 	dnsCache          *commonDnsCache[dnsCacheKey]
-	dnsKeyLocker      common.KeyLocker[dnsCacheKey]
 	dnsForwarderCache sync.Map // map[dnsForwarderKey]DnsForwarder
 	// mu protects deadlineTimers
 	mu              sync.Mutex
 	deadlineTimers  map[string]map[netip.Addr]*time.Timer
 	sniffVerifyMode consts.SniffVerifyMode
+
+	singleFlightGroup singleflight.Group
 }
 
 func parseIpVersionPreference(prefer int) (uint16, error) {
@@ -166,7 +168,10 @@ type queryInfo struct {
 type dnsCacheKey struct {
 	queryInfo
 	outbound *outbound.DialerGroup
-	//target   netip.AddrPort
+}
+
+func (k dnsCacheKey) String() string {
+	return fmt.Sprintf("%v,%v,%v", k.qname, k.qtype, k.outbound.Name)
 }
 
 func (c *DnsController) prepareQueryInfo(dnsMessage *dnsmessage.Msg) (queryInfo queryInfo) {
@@ -515,24 +520,17 @@ func (c *DnsController) reject(msg *dnsmessage.Msg) {
 	msg.Truncated = false
 }
 
-// TODO: 简化 cacheKey?
 func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, dialArgument *dialArgument, queryInfo queryInfo) error {
 	/// Dial and send.
 	// get forwarder from cache
 	key := dnsForwarderKey{upstream: upstream.String(), dialArgument: *dialArgument}
-	var cacheKey *dnsCacheKey
-	if c.enableCache {
-		cacheKey = &dnsCacheKey{queryInfo: queryInfo, outbound: dialArgument.Outbound}
-		// No parallel for the same lookup.
-		l, _ := c.dnsKeyLocker.Lock(*cacheKey)
-		defer c.dnsKeyLocker.Unlock(*cacheKey, l)
-	}
+	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArgument.Outbound}
 	var forwarder DnsForwarder
 	value, ok := c.dnsForwarderCache.Load(key)
 	if ok {
 		// Lookup Cache
-		if cacheKey != nil {
-			if cache := c.dnsCache.Get(*cacheKey); cache != nil {
+		if c.enableCache {
+			if cache := c.dnsCache.Get(cacheKey); cache != nil {
 				if !AllTimeout(cache) {
 					FillInto(msg, cache)
 					if log.IsLevelEnabled(log.DebugLevel) && len(msg.Question) > 0 {
@@ -556,52 +554,70 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 		forwarder = actualValue.(DnsForwarder)
 	}
 
-	err := forwarder.ForwardDNS(msg)
-	if err != nil {
-		return err
-	}
+	// No parallel for the same lookup.
+	resp, err, _ := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
+		err := forwarder.ForwardDNS(msg)
+		if err != nil {
+			return nil, err
+		}
 
-	if log.IsLevelEnabled(log.DebugLevel) {
-		log.WithFields(log.Fields{
-			"qname": queryInfo.qname,
-			"qtype": queryInfo.qtype,
-			"rcode": msg.Rcode,
-			"ans":   FormatDnsRsc(msg.Answer),
-		}).Debugf("Got DNS response")
-	}
-
-	// TODO: 细分日志
-	if !msg.Response {
-		return oops.Errorf("DNS message response flag is unset")
-	}
-	switch {
-	case len(msg.Question) == 0, // Check healthy resp.
-		msg.Rcode != dnsmessage.RcodeSuccess: // Check suc resp.
-		log.WithFields(log.Fields{
-			"qname": queryInfo.qname,
-			"qtype": queryInfo.qtype,
-			"rcode": msg.Rcode,
-			"ans":   FormatDnsRsc(msg.Answer),
-		}).Tracef("Not a valid DNS response")
-		return nil
-	}
-
-	if cacheKey != nil {
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
-				"qname":    queryInfo.qname,
-				"qtype":    queryInfo.qtype,
-				"rcode":    msg.Rcode,
-				"ans":      FormatDnsRsc(msg.Answer),
-				"upstream": upstream,
-				"dialer":   dialArgument.Dialer,
-				"outbound": dialArgument.Outbound,
-			}).Debugf("Update DNS record cache")
+				"qname": queryInfo.qname,
+				"qtype": queryInfo.qtype,
+				"rcode": msg.Rcode,
+				"ans":   FormatDnsRsc(msg.Answer),
+			}).Debugf("Got DNS response")
 		}
-		c.UpdateDnsCacheTtl(*cacheKey, queryInfo.qname, msg.Answer)
-	}
 
-	return nil
+		// TODO: 细分日志
+		if !msg.Response {
+			return nil, oops.Errorf("DNS message response flag is unset")
+		}
+		switch {
+		case len(msg.Question) == 0, // Check healthy resp.
+			msg.Rcode != dnsmessage.RcodeSuccess: // Check suc resp.
+			log.WithFields(log.Fields{
+				"qname": queryInfo.qname,
+				"qtype": queryInfo.qtype,
+				"rcode": msg.Rcode,
+				"ans":   FormatDnsRsc(msg.Answer),
+			}).Tracef("Not a valid DNS response")
+			return msg, nil
+		}
+
+		if c.enableCache {
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.WithFields(log.Fields{
+					"qname":    queryInfo.qname,
+					"qtype":    queryInfo.qtype,
+					"rcode":    msg.Rcode,
+					"ans":      FormatDnsRsc(msg.Answer),
+					"upstream": upstream,
+					"dialer":   dialArgument.Dialer,
+					"outbound": dialArgument.Outbound,
+				}).Debugf("Update DNS record cache")
+			}
+			c.UpdateDnsCacheTtl(cacheKey, queryInfo.qname, msg.Answer)
+		}
+
+		return msg, nil
+	})
+	if err == nil && resp != nil {
+		msgResp := resp.(*dnsmessage.Msg)
+		// Only copy necessary response fields. Note: the msg.Id may be changing in the first goroutine.
+		msg.Response = true
+		msg.Rcode = msgResp.Rcode
+		msg.RecursionAvailable = msgResp.RecursionAvailable
+		msg.Truncated = msgResp.Truncated
+		msg.Authoritative = msgResp.Authoritative
+		msg.AuthenticatedData = msgResp.AuthenticatedData
+		// The answers should have been saved to cache and won't be modified afterwards.
+		msg.Answer = msgResp.Answer
+		msg.Ns = msgResp.Ns
+		msg.Extra = msgResp.Extra
+	}
+	return err
 }
 
 func (c *DnsController) Close() error {
