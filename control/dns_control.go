@@ -521,13 +521,9 @@ func (c *DnsController) reject(msg *dnsmessage.Msg) {
 }
 
 func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, dialArgument *dialArgument, queryInfo queryInfo) error {
-	/// Dial and send.
-	// get forwarder from cache
-	key := dnsForwarderKey{upstream: upstream.String(), dialArgument: *dialArgument}
 	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArgument.Outbound}
-	var forwarder DnsForwarder
-	value, ok := c.dnsForwarderCache.Load(key)
-	if ok {
+	// Pending for the same lookup.
+	resp, err, _ := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
 		// Lookup Cache
 		if c.enableCache {
 			if cache := c.dnsCache.Get(cacheKey); cache != nil {
@@ -538,24 +534,27 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 							"answer": msg.Answer,
 						}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
 					}
-					return nil
+					return msg, nil
 				}
 			}
 		}
-		forwarder = value.(DnsForwarder)
-	} else {
-		var err error
-		forwarder, err = newDnsForwarder(upstream, *dialArgument)
-		if err != nil {
-			return err
+		var forwarder DnsForwarder
+		key := dnsForwarderKey{upstream: upstream.String(), dialArgument: *dialArgument}
+		// get forwarder from cache
+		value, ok := c.dnsForwarderCache.Load(key)
+		if ok {
+			forwarder = value.(DnsForwarder)
+		} else {
+			var err error
+			forwarder, err = newDnsForwarder(upstream, *dialArgument)
+			if err != nil {
+				return nil, err
+			}
+			// Try to store the new forwarder, but use LoadOrStore to handle concurrent creation
+			actualValue, _ := c.dnsForwarderCache.LoadOrStore(key, forwarder)
+			forwarder = actualValue.(DnsForwarder)
 		}
-		// Try to store the new forwarder, but use LoadOrStore to handle concurrent creation
-		actualValue, _ := c.dnsForwarderCache.LoadOrStore(key, forwarder)
-		forwarder = actualValue.(DnsForwarder)
-	}
 
-	// No parallel for the same lookup.
-	resp, err, _ := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
 		err := forwarder.ForwardDNS(msg)
 		if err != nil {
 			return nil, err
@@ -603,7 +602,7 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 
 		return msg, nil
 	})
-	if err == nil && resp != nil {
+	if err == nil && resp != nil && resp != msg {
 		msgResp := resp.(*dnsmessage.Msg)
 		// Only copy necessary response fields. Note: the msg.Id may be changing in the first goroutine.
 		msg.Response = true
