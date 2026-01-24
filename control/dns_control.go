@@ -200,65 +200,63 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	// Avoids duplicated id from clients, so make the id unique.
 	dnsMessage.Id = uint16(fastrand.Intn(math.MaxUint16))
 
-	go func() {
-		var err error
-		// Check ip version preference and qtype.
-		switch queryInfo.qtype {
-		case dnsmessage.TypeA, dnsmessage.TypeAAAA:
-			if c.qtypePrefer == 0 {
-				err = c.handleDNSRequest(dnsMessage, req, queryInfo)
-			} else {
-				// Try to make both A and AAAA lookups.
-				dnsMessage2 := dnsMessage.Copy()
-				dnsMessage2.Id = uint16(fastrand.Intn(math.MaxUint16))
-				switch queryInfo.qtype {
-				case dnsmessage.TypeA:
-					dnsMessage2.Question[0].Qtype = dnsmessage.TypeAAAA
-				case dnsmessage.TypeAAAA:
-					dnsMessage2.Question[0].Qtype = dnsmessage.TypeA
-				}
-
-				// TODO: ignoreFixedTTL?
-				errCh := make(chan error, 1)
-				go func() {
-					err = c.handleDNSRequest(dnsMessage2, req, queryInfo)
-					errCh <- err
-				}()
-				err = oops.Join(c.handleDNSRequest(dnsMessage, req, queryInfo), <-errCh)
-				if err != nil {
-					break
-				}
-				if c.qtypePrefer != queryInfo.qtype && dnsMessage2 != nil && IncludeAnyIpInMsg(dnsMessage2) {
-					c.reject(dnsMessage)
-				}
-			}
-		default:
+	var err error
+	// Check ip version preference and qtype.
+	switch queryInfo.qtype {
+	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
+		if c.qtypePrefer == 0 {
 			err = c.handleDNSRequest(dnsMessage, req, queryInfo)
-		}
-		if err != nil {
-			netErr, ok := IsNetError(err)
-			err = oops.
-				With("Is NetError", ok).
-				With("Is Temporary", ok && netErr.Temporary()).
-				With("Is Timeout", ok && netErr.Timeout()).
-				Wrapf(err, "failed to make dns request")
-			if !ok || !netErr.Temporary() {
-				log.Warningf("%+v", err)
+		} else {
+			// Try to make both A and AAAA lookups.
+			dnsMessage2 := dnsMessage.Copy()
+			dnsMessage2.Id = uint16(fastrand.Intn(math.MaxUint16))
+			switch queryInfo.qtype {
+			case dnsmessage.TypeA:
+				dnsMessage2.Question[0].Qtype = dnsmessage.TypeAAAA
+			case dnsmessage.TypeAAAA:
+				dnsMessage2.Question[0].Qtype = dnsmessage.TypeA
 			}
-			dnsMessage.Rcode = dnsmessage.RcodeServerFailure
-			dnsMessage.Response = true
+
+			// TODO: ignoreFixedTTL?
+			errCh := make(chan error, 1)
+			go func() {
+				err = c.handleDNSRequest(dnsMessage2, req, queryInfo)
+				errCh <- err
+			}()
+			err = oops.Join(c.handleDNSRequest(dnsMessage, req, queryInfo), <-errCh)
+			if err != nil {
+				break
+			}
+			if c.qtypePrefer != queryInfo.qtype && dnsMessage2 != nil && IncludeAnyIpInMsg(dnsMessage2) {
+				c.reject(dnsMessage)
+			}
 		}
-		// Keep the id the same with request.
-		dnsMessage.Id = id
-		dnsMessage.Compress = true
-		buf := pool.GetBuffer(512)
-		defer pool.PutBuffer(buf)
-		if data, err := dnsMessage.PackBuffer(buf); err != nil {
-			log.Errorf("%+v", oops.Wrapf(err, "failed to pack dns message"))
-		} else if err = sendPkt(data, req.dst, req.src); err != nil {
-			log.Warningf("%+v", oops.Wrapf(err, "failed to send dns message back"))
+	default:
+		err = c.handleDNSRequest(dnsMessage, req, queryInfo)
+	}
+	if err != nil {
+		netErr, ok := IsNetError(err)
+		err = oops.
+			With("Is NetError", ok).
+			With("Is Temporary", ok && netErr.Temporary()).
+			With("Is Timeout", ok && netErr.Timeout()).
+			Wrapf(err, "failed to make dns request")
+		if !ok || !netErr.Temporary() {
+			log.Warningf("%+v", err)
 		}
-	}()
+		dnsMessage.Rcode = dnsmessage.RcodeServerFailure
+		dnsMessage.Response = true
+	}
+	// Keep the id the same with request.
+	dnsMessage.Id = id
+	dnsMessage.Compress = true
+	buf := pool.GetBuffer(512)
+	defer pool.PutBuffer(buf)
+	if data, err := dnsMessage.PackBuffer(buf); err != nil {
+		log.Errorf("%+v", oops.Wrapf(err, "failed to pack dns message"))
+	} else if err = sendPkt(data, req.dst, req.src); err != nil {
+		log.Warningf("%+v", oops.Wrapf(err, "failed to send dns message back"))
+	}
 }
 
 // TODO: 除了dialSend, 不应该有可预期的 err

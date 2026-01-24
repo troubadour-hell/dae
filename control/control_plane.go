@@ -876,6 +876,12 @@ func getVmRSS() (int64, error) {
 	return 0, oops.Errorf("VmRSS not found in /proc/self/status")
 }
 
+type udpJob struct {
+	src  netip.AddrPort
+	oob  []byte
+	data []byte
+}
+
 func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err error) {
 	sentReady := false
 	defer func() {
@@ -883,7 +889,6 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 			readyChan <- false
 		}
 	}()
-	udpConn := listener.packetConn.(*net.UDPConn)
 	/// Serve.
 	// TCP socket.
 	tcpFile, err := listener.tcpListener.(*net.TCPListener).File()
@@ -897,11 +902,13 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 		return err
 	}
 	// UDP socket.
+	udpConn := listener.packetConn.(*net.UDPConn)
 	udpFile, err := udpConn.File()
 	if err != nil {
 		return oops.Errorf("failed to retrieve copy of the underlying UDP connection file")
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
+		udpConn.Close()
 		return udpFile.Close()
 	})
 	if err := c.core.bpf.ListenSocketMap.Update(consts.OneKey, uint64(udpFile.Fd()), ebpf.UpdateAny); err != nil {
@@ -955,16 +962,61 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 		}
 	}()
 	go func() {
+		// Workder pool for dns.
+		const workerCount = 64 // or runtime.NumCPU()
+		workerChans := make([]chan *udpJob, workerCount)
+		defer func() {
+			for _, ch := range workerChans {
+				close(ch)
+			}
+		}()
+		for i := range workerCount {
+			workerChans[i] = make(chan *udpJob, 1000)
+			go func(id int, ch chan *udpJob) {
+				for job := range ch {
+					dst := common.ConvergeAddrPort(RetrieveOriginalDest(job.oob))
+					pool.PutBuffer(job.oob)
+					src := common.ConvergeAddrPort(job.src)
+					data := job.data
+					/// Handle DNS
+					// To keep consistency with kernel program, we only sniff DNS request sent to 53.
+					if dst.Port() == 53 {
+						routingResult, err := c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP)
+						if err != nil {
+							log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
+							pool.PutBuffer(data)
+							continue
+						}
+						if routingResult.Must == 0 {
+							var dnsMessage dnsmessage.Msg
+							if err := dnsMessage.Unpack(data); err == nil {
+								c.dnsController.Handle(&dnsMessage, &dnsRequest{
+									src:           src,
+									dst:           dst,
+									routingResult: routingResult,
+								})
+								pool.PutBuffer(data)
+								continue
+							}
+						}
+					}
+
+					DefaultUdpTaskPool.EmitTask(src, func() {
+						defer pool.PutBuffer(data)
+						if e := c.handlePkt(udpConn, data, src, dst, false); e != nil && c.ctx.Err() == nil {
+							log.Warningf("%+v", oops.Wrapf(e, "handlePkt"))
+						}
+					})
+				}
+			}(i, workerChans[i])
+		}
+
 		buf := pool.GetBuffer(consts.EthernetMtu)
 		oob := pool.GetBuffer(120)
 		defer pool.PutBuffer(buf)
 		defer pool.PutBuffer(oob)
+		index := 0
 		for {
-			select {
-			case <-c.ctx.Done():
-				return
-			default:
-			}
 			n, oobn, _, src, err := udpConn.ReadMsgUDPAddrPort(buf, oob)
 			if err != nil {
 				if !strings.Contains(err.Error(), "use of closed network connection") {
@@ -972,46 +1024,14 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 				}
 				break
 			}
-			dst := RetrieveOriginalDest(oob[:oobn])
 
-			src = common.ConvergeAddrPort(src)
-			dst = common.ConvergeAddrPort(dst)
-
-			/// Handle DNS
-			// To keep consistency with kernel program, we only sniff DNS request sent to 53.
-			if dst.Port() == 53 {
-				routingResult, err := c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP)
-				if err != nil {
-					log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
-					continue
-				}
-				if routingResult.Must == 0 {
-					var dnsMessage dnsmessage.Msg
-					if err := dnsMessage.Unpack(buf[:n]); err == nil {
-						c.dnsController.Handle(&dnsMessage, &dnsRequest{
-							src:           src,
-							dst:           dst,
-							routingResult: routingResult,
-						})
-						continue
-					}
-				}
-			}
-
+			oobData := pool.GetBuffer(oobn)
+			copy(oobData, oob[:oobn])
 			data := pool.GetBuffer(n)
 			copy(data, buf[:n])
 
-			// Debug:
-			// t := time.Now()
-			DefaultUdpTaskPool.EmitTask(src, func() {
-				defer pool.PutBuffer(data)
-				if e := c.handlePkt(udpConn, data, src, dst, false); e != nil && c.ctx.Err() == nil {
-					log.Warningf("%+v", oops.Wrapf(e, "handlePkt"))
-				}
-			})
-			// if d := time.Since(t); d > 100*time.Millisecond {
-			// 	log.Println(d)
-			// }
+			workerChans[index%workerCount] <- &udpJob{src: src, oob: oobData, data: data}
+			index++
 		}
 	}()
 	<-c.ctx.Done()
