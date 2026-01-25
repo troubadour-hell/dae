@@ -903,12 +903,13 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	}
 	// UDP socket.
 	udpConn := listener.packetConn.(*net.UDPConn)
+	udpConn.SetDeadline(time.Time{})
 	udpFile, err := udpConn.File()
 	if err != nil {
 		return oops.Errorf("failed to retrieve copy of the underlying UDP connection file")
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
-		udpConn.Close()
+		udpConn.SetDeadline(time.Unix(0, 1)) // unblock ReadMsgUDPAddrPort
 		return udpFile.Close()
 	})
 	if err := c.core.bpf.ListenSocketMap.Update(consts.OneKey, uint64(udpFile.Fd()), ebpf.UpdateAny); err != nil {
@@ -1020,7 +1021,9 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 			n, oobn, _, src, err := udpConn.ReadMsgUDPAddrPort(buf, oob)
 			if err != nil {
 				if !strings.Contains(err.Error(), "use of closed network connection") {
-					log.Errorf("%+v", oops.Wrapf(err, "ReadFromUDPAddrPort: %v", src.String()))
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						log.Errorf("%+v", oops.Wrapf(err, "ReadFromUDPAddrPort: %v", src.String()))
+					}
 				}
 				break
 			}
