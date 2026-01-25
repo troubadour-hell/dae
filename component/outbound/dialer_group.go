@@ -115,10 +115,6 @@ func (g *DialerGroup) Select(networkType *common.NetworkType) (dialer *dialer.Di
 	}
 select_dialer:
 	dialer = g.selector.Select(networkType)
-	if err != nil {
-		return nil, err
-	}
-
 	if dialer == nil {
 		// TODO: 这种情况下应该尝试测试网络连接性, 若从无连接变为有连接则重新测速所有节点?
 		return nil, ErrNoAliveDialer

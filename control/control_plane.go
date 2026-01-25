@@ -88,6 +88,7 @@ type ControlPlane struct {
 	PrometheusRegistry *prometheus.Registry
 
 	outboundRedirects map[consts.OutboundIndex]consts.OutboundIndex
+	dialOptionPool    sync.Pool
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -412,6 +413,11 @@ func NewControlPlane(
 		trafficLogger:          trafficLogger,
 		PrometheusRegistry:     prometheusRegistry,
 		outboundRedirects:      outboundRedirects,
+		dialOptionPool: sync.Pool{
+			New: func() any {
+				return &DialOption{}
+			},
+		},
 	}
 	defer func() {
 		if err != nil {
@@ -962,6 +968,20 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 			}(lconn)
 		}
 	}()
+
+	var dnsRequestPool sync.Pool
+	dnsRequestPool.New = func() any {
+		return &dnsRequest{}
+	}
+
+	newDnsRequest := func(src, dst netip.AddrPort, routingResult *bpfRoutingResult) *dnsRequest {
+		req := dnsRequestPool.Get().(*dnsRequest)
+		req.src = src
+		req.dst = dst
+		req.routingResult = routingResult
+		return req
+	}
+
 	go func() {
 		// Workder pool for dns.
 		const workerCount = 64 // or runtime.NumCPU()
@@ -991,15 +1011,15 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 						if routingResult.Must == 0 {
 							var dnsMessage dnsmessage.Msg
 							if err := dnsMessage.Unpack(data); err == nil {
-								c.dnsController.Handle(&dnsMessage, &dnsRequest{
-									src:           src,
-									dst:           dst,
-									routingResult: routingResult,
-								})
+								dnsReq := newDnsRequest(src, dst, routingResult)
+								c.dnsController.Handle(&dnsMessage, dnsReq)
+								dnsRequestPool.Put(dnsReq)
 								pool.PutBuffer(data)
+								c.core.RecycleRoutingResult(routingResult)
 								continue
 							}
 						}
+						c.core.RecycleRoutingResult(routingResult)
 					}
 
 					DefaultUdpTaskPool.EmitTask(src, func() {
@@ -1087,7 +1107,8 @@ var allNetworkTypes = []*common.NetworkType{
 func (c *ControlPlane) chooseBestDnsDialer(
 	req *dnsRequest,
 	dnsUpstream *dns.Upstream,
-) (*dialArgument, error) {
+	outArg *dialArgument,
+) error {
 	/// Choose the best l4proto+ipversion dialer, and change taregt DNS to the best ipversion DNS upstream for DNS request.
 	// Get available ipversions and l4protos for DNS upstream.
 	var (
@@ -1113,15 +1134,15 @@ func (c *ControlPlane) chooseBestDnsDialer(
 		case consts.IpVersionStr_6:
 			dAddr = dnsUpstream.Ip6
 		default:
-			return nil, oops.Errorf("unexpected ipversion: %v", ver)
+			return oops.Errorf("unexpected ipversion: %v", ver)
 		}
 		// TODO: Mark
 		outboundIndex, _, _, err := c.Route(req.src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if int(outboundIndex) >= len(c.outbounds) {
-			return nil, oops.Errorf("bad outbound index: %v", outboundIndex)
+			return oops.Errorf("bad outbound index: %v", outboundIndex)
 		}
 		// Handles outbound redirects
 		if redirected, exists := c.outboundRedirects[outboundIndex]; exists {
@@ -1142,7 +1163,7 @@ func (c *ControlPlane) chooseBestDnsDialer(
 	}
 
 	if bestDialer == nil {
-		return nil, oops.Errorf("no proper dialer for DNS upstream: %v", dnsUpstream.String())
+		return oops.Errorf("no proper dialer for DNS upstream: %v", dnsUpstream.String())
 	}
 	switch ipversion {
 	case consts.IpVersionStr_4:
@@ -1159,13 +1180,12 @@ func (c *ControlPlane) chooseBestDnsDialer(
 			"dialer":   bestDialer.Name,
 		}).Traceln("Choose DNS path")
 	}
-	return &dialArgument{
-		networkType: *networkType,
-		Dialer:      bestDialer,
-		Outbound:    bestOutbound,
-		Target:      bestTarget,
-		// mark:         dialMark,
-	}, nil
+	outArg.networkType = networkType
+	outArg.Dialer = bestDialer
+	outArg.Outbound = bestOutbound
+	outArg.Target = bestTarget
+	// outArg.mark = dialMark
+	return nil
 }
 
 func (c *ControlPlane) AbortConnections() (err error) {

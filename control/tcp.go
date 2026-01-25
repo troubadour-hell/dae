@@ -100,6 +100,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	if err != nil {
 		return oops.Wrapf(err, "failed to retrieve target info %v", dst.String())
 	}
+	defer c.core.RecycleRoutingResult(routingResult)
 
 	src = common.ConvergeAddrPort(src)
 	dst = common.ConvergeAddrPort(dst)
@@ -131,16 +132,11 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		L4Proto:   consts.L4ProtoStr_TCP,
 		IpVersion: consts.IpVersionStrFromAddr(dst.Addr()),
 	}
-	dialOption, err := c.RouteDialOption(&RouteParam{
-		routingResult: routingResult,
-		networkType:   networkType,
-		Domain:        domain,
-		Src:           src,
-		Dest:          dst,
-	})
+	dialOption, err := c.RouteDialOption(src, dst, domain, networkType, routingResult)
 	if err != nil {
 		return err
 	}
+	defer c.RecycleDialOption(dialOption)
 
 	labels := prometheus.Labels{
 		"outbound": dialOption.Outbound.Name,

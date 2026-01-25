@@ -29,14 +29,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type RouteParam struct {
-	routingResult *bpfRoutingResult
-	networkType   *common.NetworkType
-	Domain        string
-	Src           netip.AddrPort
-	Dest          netip.AddrPort
-}
-
 type DialOption struct {
 	DialTarget        string
 	Dialer            *dialer.Dialer
@@ -51,12 +43,26 @@ func IsNetError(err error) (netErr net.Error, ok bool) {
 	return
 }
 
-func (c *ControlPlane) RouteDialOption(p *RouteParam) (dialOption *DialOption, err error) {
+func (c *ControlPlane) RecycleDialOption(dialOption *DialOption) {
+	dialOption.DialTarget = ""
+	dialOption.Dialer = nil
+	dialOption.Outbound = nil
+	dialOption.FallbackIpVersion = false
+	dialOption.FallbackDialer = false
+	// dialOption.Mark = 0
+	c.dialOptionPool.Put(dialOption)
+}
+
+func (c *ControlPlane) RouteDialOption(
+	src, dst netip.AddrPort,
+	domain string,
+	networkType *common.NetworkType,
+	routingResult *bpfRoutingResult) (dialOption *DialOption, err error) {
 	// TODO: Why not directly transfer routingResult
-	outboundIndex := consts.OutboundIndex(p.routingResult.Outbound)
+	outboundIndex := consts.OutboundIndex(routingResult.Outbound)
 	// mark := p.routingResult.Mark
 
-	verified, shouldReroute := c.VerifySniff(outboundIndex, p.Dest, p.Domain)
+	verified, shouldReroute := c.VerifySniff(outboundIndex, dst, domain)
 	switch {
 	case c.rerouteMode == consts.RerouteMode_WhileNeed && shouldReroute != nil && shouldReroute(),
 		c.rerouteMode == consts.RerouteMode_Force:
@@ -66,12 +72,12 @@ func (c *ControlPlane) RouteDialOption(p *RouteParam) (dialOption *DialOption, e
 	switch outboundIndex {
 	case consts.OutboundDirect:
 	case consts.OutboundControlPlaneRouting:
-		domain := p.Domain
+		domain_ := domain
 		if !verified {
-			domain = ""
+			domain_ = ""
 		}
 		// if outboundIndex, mark, _, err = c.Route(p.Src, p.Dest, p.Domain, p.networkType.L4Proto.ToL4ProtoType(), p.routingResult); err != nil {
-		if outboundIndex, _, _, err = c.Route(p.Src, p.Dest, domain, p.networkType.L4Proto.ToL4ProtoType(), p.routingResult); err != nil {
+		if outboundIndex, _, _, err = c.Route(src, dst, domain_, networkType.L4Proto.ToL4ProtoType(), routingResult); err != nil {
 			oops.Wrap(err)
 			return
 		}
@@ -99,24 +105,24 @@ func (c *ControlPlane) RouteDialOption(p *RouteParam) (dialOption *DialOption, e
 		outboundIndex = redirected
 	}
 	outbound := c.outbounds[outboundIndex]
-	dialTarget, dialIp := c.ChooseDialTarget(outboundIndex, p.Dest, p.Domain, verified && c.dialTargetOverride)
-	dialer, fallback, err := outbound.SelectFallbackIpVersion(p.networkType, dialIp)
+	dialTarget, dialIp := c.ChooseDialTarget(outboundIndex, dst, domain, verified && c.dialTargetOverride)
+	dialer, fallback, err := outbound.SelectFallbackIpVersion(networkType, dialIp)
 	fallbackDialer := false
 	if err != nil {
-		dialer, err = c.outbounds[c.noConnectivityOutbound].Select(p.networkType)
+		dialer, err = c.outbounds[c.noConnectivityOutbound].Select(networkType)
 		if err != nil {
 			panic(fmt.Sprintf("fail to get fallback dialer %v(%v): %v", c.outbounds[c.noConnectivityOutbound], c.noConnectivityOutbound, err))
 		}
 		fallbackDialer = true
 	}
-	return &DialOption{
-		DialTarget:        dialTarget,
-		Dialer:            dialer,
-		Outbound:          outbound,
-		FallbackIpVersion: fallback,
-		FallbackDialer:    fallbackDialer,
-		// Mark:          mark,
-	}, nil
+	option := c.dialOptionPool.Get().(*DialOption)
+	option.DialTarget = dialTarget
+	option.Dialer = dialer
+	option.Outbound = outbound
+	option.FallbackIpVersion = fallback
+	option.FallbackDialer = fallbackDialer
+	// option.Mark = mark
+	return option, nil
 }
 
 type TrafficLogConn struct {
@@ -251,11 +257,15 @@ func (c *controlPlaneCore) RetrieveRoutingResult(src, dst netip.AddrPort, l4prot
 		L4proto: l4proto,
 	}
 
-	var routingResult bpfRoutingResult
-	if err := c.bpf.RoutingTuplesMap.Lookup(tuples, &routingResult); err != nil {
+	routingResult := c.routingResultPool.Get().(*bpfRoutingResult)
+	if err := c.bpf.RoutingTuplesMap.Lookup(tuples, routingResult); err != nil {
 		return nil, fmt.Errorf("reading map: key [%v, %v, %v]: %w", src.String(), l4proto, dst.String(), err)
 	}
-	return &routingResult, nil
+	return routingResult, nil
+}
+
+func (c *controlPlaneCore) RecycleRoutingResult(routingResult *bpfRoutingResult) {
+	c.routingResultPool.Put(routingResult)
 }
 
 func RetrieveOriginalDest(oob []byte) netip.AddrPort {

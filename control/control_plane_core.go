@@ -57,6 +57,8 @@ type controlPlaneCore struct {
 	closed context.Context
 	close  context.CancelFunc
 	ifmgr  *component.InterfaceManager
+
+	routingResultPool sync.Pool
 }
 
 func newControlPlaneCore(
@@ -87,6 +89,7 @@ func newControlPlaneCore(
 		domainRoutingMap:   make(map[netip.Addr][32]uint32),
 		closed:             closed,
 		close:              toClose,
+		routingResultPool:  sync.Pool{New: func() any { return &bpfRoutingResult{} }},
 	}
 }
 
@@ -652,7 +655,6 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 func getBit(bitmap []uint32, index int) uint32 {
 	return bitmap[index/32] >> (index % 32) & 1
 }
-
 
 func getBitArray(bitmap *[32]uint32, index int) uint32 {
 	return bitmap[index/32] >> (index % 32) & 1

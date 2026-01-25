@@ -38,10 +38,9 @@ func NewLatencyBasedSelector(dialerGroup *DialerGroup, tolerance time.Duration, 
 }
 
 func (s *LatencyBasedSelector) Select(networkType *common.NetworkType) *dialer.Dialer {
+	index := common.NetworkTypeToIndex(networkType)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	index := common.NetworkTypeToIndex(networkType)
 	return s.networkIndexToDialer[index]
 }
 

@@ -55,7 +55,7 @@ type DnsControllerOption struct {
 	MatchBitmap        func(fqdn string) []uint32
 	NewLookupCache     func(ip netip.Addr, domainBitmap [32]uint32) error
 	LookupCacheTimeout func(ip netip.Addr, domainBitmap [32]uint32) error
-	BestDialerChooser  func(req *dnsRequest, upstream *dns.Upstream) (*dialArgument, error)
+	BestDialerChooser  func(req *dnsRequest, upstream *dns.Upstream, outArg *dialArgument) error
 	IpVersionPrefer    int
 	FixedDomainTtl     map[string]int
 	MinSniffingTtl     time.Duration
@@ -70,7 +70,7 @@ type DnsController struct {
 	matchBitmap        func(fqdn string) []uint32
 	newLookupCache     func(ip netip.Addr, domainBitmap [32]uint32) error
 	lookupCacheTimeout func(ip netip.Addr, domainBitmap [32]uint32) error
-	bestDialerChooser  func(req *dnsRequest, upstream *dns.Upstream) (*dialArgument, error)
+	bestDialerChooser  func(req *dnsRequest, upstream *dns.Upstream, outArg *dialArgument) error
 
 	fixedDomainTtl    map[string]int
 	minSniffingTtl    time.Duration
@@ -83,6 +83,7 @@ type DnsController struct {
 	sniffVerifyMode consts.SniffVerifyMode
 
 	singleFlightGroup singleflight.Group
+	dialArgumentPool  sync.Pool
 }
 
 func parseIpVersionPreference(prefer int) (uint16, error) {
@@ -121,6 +122,8 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		dnsForwarderCache: sync.Map{},
 		dnsCache:          newCommonDnsCache[dnsCacheKey](),
 		deadlineTimers:    make(map[string]map[netip.Addr]*time.Timer),
+
+		dialArgumentPool: sync.Pool{New: func() any { return &dialArgument{} }},
 	}, nil
 }
 
@@ -148,7 +151,7 @@ type dnsRequest struct {
 }
 
 type dialArgument struct {
-	networkType common.NetworkType
+	networkType *common.NetworkType
 	Dialer      *dialer.Dialer
 	Outbound    *outbound.DialerGroup
 	Target      netip.AddrPort
@@ -303,6 +306,8 @@ func (c *DnsController) handleDNSRequest(
 	} else {
 		reqMsg = dnsMessage.Copy()
 	}
+	dialArgument := c.dialArgumentPool.Get().(*dialArgument)
+	defer c.dialArgumentPool.Put(dialArgument)
 Dial:
 	for invokingDepth := 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
 		if log.IsLevelEnabled(log.DebugLevel) {
@@ -313,8 +318,7 @@ Dial:
 		}
 
 		// Select best dial arguments (outbound, dialer, l4proto, ipversion, etc.)
-		dialArgument, err := c.bestDialerChooser(req, upstream)
-		if err != nil {
+		if err := c.bestDialerChooser(req, upstream, dialArgument); err != nil {
 			return err
 		}
 
