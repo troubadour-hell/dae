@@ -38,17 +38,31 @@ func GetIp(rr dnsmessage.RR) (netip.Addr, bool) {
 	return ip, true
 }
 
-func FillInto(msg *dnsmessage.Msg, caches []*DnsCache) {
+func FillInto(msg *dnsmessage.Msg, caches []*DnsCache) bool {
+	now := time.Now()
+	// Ugly copying RR logic to avoid concurrent read/write TTL.
+	// TODO: Optimize this by byte-level copying?
+	m := &dnsmessage.Msg{}
+	ttls := make([]uint32, 0)
 	for _, cache := range caches {
-		if cache.Deadline.After(time.Now()) {
-			cache.Answer.Header().Ttl = uint32(time.Until(cache.Deadline).Seconds())
-			msg.Answer = append(msg.Answer, cache.Answer)
+		if cache.Deadline.After(now) {
+			ttls = append(ttls, uint32(time.Until(cache.Deadline).Seconds()))
+			m.Answer = append(m.Answer, cache.Answer)
 		}
 	}
+	if len(m.Answer) == 0 {
+		return false
+	}
+	m = m.Copy()
+	for i := range m.Answer {
+		m.Answer[i].Header().Ttl = ttls[i]
+	}
+	msg.Answer = m.Answer
 	msg.Rcode = dnsmessage.RcodeSuccess
 	msg.Response = true
 	msg.RecursionAvailable = true
 	msg.Truncated = false
+	return true
 }
 
 func IncludeAnyIpInMsg(msg *dnsmessage.Msg) bool {
@@ -79,15 +93,6 @@ func (c *commonDnsCache[K]) Get(cacheKey K) []*DnsCache {
 		return caches
 	}
 	return nil
-}
-
-func AllTimeout(caches []*DnsCache) bool {
-	for _, cache := range caches {
-		if cache.Deadline.After(time.Now()) {
-			return false
-		}
-	}
-	return true
 }
 
 func (c *commonDnsCache[K]) UpdateTtl(key K, answer dnsmessage.RR, ttl int) (cache *DnsCache) {

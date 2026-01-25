@@ -520,22 +520,21 @@ func (c *DnsController) reject(msg *dnsmessage.Msg) {
 
 func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, dialArgument *dialArgument, queryInfo queryInfo) error {
 	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArgument.Outbound}
-	// Pending for the same lookup.
-	resp, err, _ := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
-		// Lookup Cache
-		if c.enableCache {
-			if cache := c.dnsCache.Get(cacheKey); cache != nil {
-				if !AllTimeout(cache) {
-					FillInto(msg, cache)
-					if log.IsLevelEnabled(log.DebugLevel) && len(msg.Question) > 0 {
-						log.WithFields(log.Fields{
-							"answer": msg.Answer,
-						}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
-					}
-					return msg, nil
+	// Lookup Cache
+	if c.enableCache {
+		if caches := c.dnsCache.Get(cacheKey); caches != nil {
+			if FillInto(msg, caches) {
+				if log.IsLevelEnabled(log.DebugLevel) && len(msg.Question) > 0 {
+					log.WithFields(log.Fields{
+						"answer": msg.Answer,
+					}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
 				}
+				return nil
 			}
 		}
+	}
+	// Pending for the same lookup.
+	resp, err, _ := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
 		var forwarder DnsForwarder
 		key := dnsForwarderKey{upstream: upstream.String(), dialArgument: *dialArgument}
 		// get forwarder from cache
