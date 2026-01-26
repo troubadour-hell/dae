@@ -8,10 +8,12 @@ package control
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -224,24 +226,42 @@ type DoTcpOrUdp struct {
 	dialArgument dialArgument
 	dnsManager   *DnsManager
 	network      string // "tcp" or "udp"
+	mu           sync.Mutex
 }
 
 // TODO: Connection reuse
-func (d *DoTcpOrUdp) ForwardDNS(msg *dnsmessage.Msg) error {
-	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
-	defer cancel()
-	return d.forwardDnsWithContext(ctx, msg)
+func (d *DoTcpOrUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
+	// Retry once on net.ErrClosed which may happen when race condition between DnsManager's Resolve() and read().
+	maxRetries := 1
+	for i := 0; i <= maxRetries; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), consts.DefaultDialTimeout)
+		err = d.forwardDnsWithContext(ctx, msg)
+		cancel()
+		if !errors.Is(err, net.ErrClosed) {
+			break
+		}
+	}
+	return err
 }
 
 func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, msg *dnsmessage.Msg) error {
+	d.mu.Lock()
 	if d.dnsManager == nil || d.dnsManager.IsClosed() {
 		conn, err := d.dialArgument.Dialer.DialContext(ctx, d.network, d.dialArgument.Target.String())
 		if err != nil {
+			d.mu.Unlock()
 			return err
 		}
 		d.dnsManager = NewDnsManager(conn, d.network == "tcp", d.dialArgument.Dialer.Name)
 	}
-	return d.dnsManager.Resolve(ctx, msg)
+	mgr := d.dnsManager
+	d.mu.Unlock()
+
+	err := mgr.Resolve(ctx, msg)
+	if errors.Is(err, net.ErrClosed) {
+		mgr.Close()
+	}
+	return err
 }
 
 type DoTcpAndUdp struct {
