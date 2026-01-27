@@ -120,7 +120,7 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedT
 			}
 		}
 	}
-	if maxTTL == 0 {
+	if maxTTL < minClientTtl {
 		return nil
 	}
 	newCache := &DnsCache{
