@@ -127,20 +127,9 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 	}, nil
 }
 
-func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, fqdn string, answers []dnsmessage.RR) {
-	ttl := 0
-	for _, ans := range answers {
-		if ttl == 0 {
-			ttl = int(ans.Header().Ttl)
-			break
-		}
-	}
-	if fixedTtl, ok := c.fixedDomainTtl[fqdn]; ok {
-		ttl = fixedTtl
-	}
-	for _, answer := range answers {
-		c.dnsCache.UpdateTtl(cacheKey, answer, ttl)
-	}
+func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, answers []dnsmessage.RR) {
+	fixedTtl, _ := c.fixedDomainTtl[cacheKey.qname]
+	c.dnsCache.UpdateAnswers(cacheKey, answers, fixedTtl)
 }
 
 type dnsRequest struct {
@@ -526,8 +515,8 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArgument.Outbound}
 	// Lookup Cache
 	if c.enableCache {
-		if caches := c.dnsCache.Get(cacheKey); caches != nil {
-			if FillInto(msg, caches) {
+		if cache := c.dnsCache.Get(cacheKey); cache != nil {
+			if FillInto(msg, cache) {
 				if log.IsLevelEnabled(log.DebugLevel) && len(msg.Question) > 0 {
 					log.WithFields(log.Fields{
 						"answer": msg.Answer,
@@ -538,6 +527,25 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 		}
 	}
 	// Pending for the same lookup.
+	msgResp, err := c.singleFlightForwardDNS(cacheKey, msg, upstream, dialArgument)
+	if err == nil && msgResp != nil && msgResp != msg {
+		// Only copy necessary response fields. Note: the msg.Id may be changing in the first goroutine.
+		msg.Response = true
+		msg.Rcode = msgResp.Rcode
+		msg.RecursionAvailable = msgResp.RecursionAvailable
+		msg.Truncated = msgResp.Truncated
+		msg.Authoritative = msgResp.Authoritative
+		msg.AuthenticatedData = msgResp.AuthenticatedData
+		// The answers should have been saved to cache and won't be modified afterwards.
+		msg.Answer = msgResp.Answer
+		msg.Ns = msgResp.Ns
+		msg.Extra = msgResp.Extra
+	}
+	return err
+}
+
+func (c *DnsController) singleFlightForwardDNS(
+	cacheKey dnsCacheKey, msg *dnsmessage.Msg, upstream *dns.Upstream, dialArgument *dialArgument) (*dnsmessage.Msg, error) {
 	resp, err, _ := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
 		var forwarder DnsForwarder
 		key := dnsForwarderKey{upstream: upstream.String(), dialArgument: *dialArgument}
@@ -563,8 +571,8 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
-				"qname": queryInfo.qname,
-				"qtype": queryInfo.qtype,
+				"qname": cacheKey.qname,
+				"qtype": cacheKey.qtype,
 				"rcode": msg.Rcode,
 				"ans":   FormatDnsRsc(msg.Answer),
 			}).Debugf("Got DNS response")
@@ -578,8 +586,8 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 		case len(msg.Question) == 0, // Check healthy resp.
 			msg.Rcode != dnsmessage.RcodeSuccess: // Check suc resp.
 			log.WithFields(log.Fields{
-				"qname": queryInfo.qname,
-				"qtype": queryInfo.qtype,
+				"qname": cacheKey.qname,
+				"qtype": cacheKey.qtype,
 				"rcode": msg.Rcode,
 				"ans":   FormatDnsRsc(msg.Answer),
 			}).Tracef("Not a valid DNS response")
@@ -589,8 +597,8 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 		if c.enableCache {
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
-					"qname":    queryInfo.qname,
-					"qtype":    queryInfo.qtype,
+					"qname":    cacheKey.qname,
+					"qtype":    cacheKey.qtype,
 					"rcode":    msg.Rcode,
 					"ans":      FormatDnsRsc(msg.Answer),
 					"upstream": upstream,
@@ -598,26 +606,15 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 					"outbound": dialArgument.Outbound,
 				}).Debugf("Update DNS record cache")
 			}
-			c.UpdateDnsCacheTtl(cacheKey, queryInfo.qname, msg.Answer)
+			c.UpdateDnsCacheTtl(cacheKey, msg.Answer)
 		}
 
 		return msg, nil
 	})
-	if err == nil && resp != nil && resp != msg {
-		msgResp := resp.(*dnsmessage.Msg)
-		// Only copy necessary response fields. Note: the msg.Id may be changing in the first goroutine.
-		msg.Response = true
-		msg.Rcode = msgResp.Rcode
-		msg.RecursionAvailable = msgResp.RecursionAvailable
-		msg.Truncated = msgResp.Truncated
-		msg.Authoritative = msgResp.Authoritative
-		msg.AuthenticatedData = msgResp.AuthenticatedData
-		// The answers should have been saved to cache and won't be modified afterwards.
-		msg.Answer = msgResp.Answer
-		msg.Ns = msgResp.Ns
-		msg.Extra = msgResp.Extra
+	if resp != nil {
+		return resp.(*dnsmessage.Msg), err
 	}
-	return err
+	return nil, err
 }
 
 func (c *DnsController) Close() error {

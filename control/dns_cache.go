@@ -6,6 +6,7 @@
 package control
 
 import (
+	"math"
 	"net/netip"
 	"sync"
 	"time"
@@ -15,9 +16,9 @@ import (
 )
 
 type DnsCache struct {
-	Answer   dnsmessage.RR
-	Deadline time.Time
-	timer    *time.Timer
+	Answers   []dnsmessage.RR
+	FetchedAt time.Time
+	timer     *time.Timer
 }
 
 // Parse ips from DNS resp answers.
@@ -38,16 +39,16 @@ func GetIp(rr dnsmessage.RR) (netip.Addr, bool) {
 	return ip, true
 }
 
-func FillInto(msg *dnsmessage.Msg, caches []*DnsCache) bool {
-	now := time.Now()
+func FillInto(msg *dnsmessage.Msg, cache *DnsCache) bool {
 	// Ugly copying RR logic to avoid concurrent read/write TTL.
 	// TODO: Optimize this by byte-level copying?
 	m := &dnsmessage.Msg{}
 	ttls := make([]uint32, 0)
-	for _, cache := range caches {
-		if cache.Deadline.After(now) {
-			ttls = append(ttls, uint32(time.Until(cache.Deadline).Seconds()))
-			m.Answer = append(m.Answer, cache.Answer)
+	ttlDeduction := uint32(time.Since(cache.FetchedAt).Seconds())
+	for _, ans := range cache.Answers {
+		if ans.Header().Ttl > ttlDeduction {
+			ttls = append(ttls, ans.Header().Ttl-ttlDeduction)
+			m.Answer = append(m.Answer, ans)
 		}
 	}
 	if len(m.Answer) == 0 {
@@ -76,71 +77,61 @@ func IncludeAnyIpInMsg(msg *dnsmessage.Msg) bool {
 }
 
 type commonDnsCache[K comparable] struct {
-	cache map[K][]*DnsCache
-	mu    sync.RWMutex
+	cache sync.Map
 }
 
 func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
-	return &commonDnsCache[K]{
-		cache: make(map[K][]*DnsCache),
-	}
+	return &commonDnsCache[K]{}
 }
 
-func (c *commonDnsCache[K]) Get(cacheKey K) []*DnsCache {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if caches, ok := c.cache[cacheKey]; ok {
-		return caches
+func (c *commonDnsCache[K]) Get(cacheKey K) *DnsCache {
+	val, ok := c.cache.Load(cacheKey)
+	if !ok {
+		return nil
 	}
-	return nil
+	return val.(*DnsCache)
 }
 
-func (c *commonDnsCache[K]) UpdateTtl(key K, answer dnsmessage.RR, ttl int) (cache *DnsCache) {
-	deadline := time.Now().Add(time.Duration(ttl) * time.Second)
+func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedTtl int) *DnsCache {
+	if len(answers) == 0 {
+		return nil
+	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	newDnsCache := func() *DnsCache {
-		ret := &DnsCache{
-			Answer:   answer,
-			Deadline: deadline,
+	var minTTL uint32 = math.MaxUint32
+	if fixedTtl > 0 {
+		minTTL = uint32(fixedTtl)
+		for _, ans := range answers {
+			ans.Header().Ttl = uint32(fixedTtl)
 		}
-		ret.timer = time.AfterFunc(time.Until(deadline), func() {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			if caches, ok := c.cache[key]; ok {
-				for i, cache := range caches {
-					if cache == ret {
-						caches = append(caches[:i], caches[i+1:]...)
-						common.DnsCacheSize.Dec()
-						break
-					}
-				}
-				if len(caches) == 0 {
-					delete(c.cache, key)
-				} else {
-					c.cache[key] = caches
-				}
+	} else {
+		for _, ans := range answers {
+			if ttl := ans.Header().Ttl; ttl < minTTL {
+				minTTL = ttl
 			}
-		})
+		}
+	}
+	if minTTL == 0 || minTTL == math.MaxUint32 {
+		return nil
+	}
+	newCache := &DnsCache{
+		Answers:   answers,
+		FetchedAt: time.Now(),
+	}
+	newCache.timer = time.AfterFunc(time.Duration(minTTL)*time.Second, func() {
+		actual, loaded := c.cache.Load(key)
+		if loaded && actual == newCache {
+			if c.cache.CompareAndDelete(key, newCache) {
+				common.DnsCacheSize.Dec()
+			}
+		}
+	})
+
+	oldVal, loaded := c.cache.Swap(key, newCache)
+	if loaded {
+		oldVal.(*DnsCache).timer.Stop()
+	} else {
 		common.DnsCacheSize.Inc()
-		return ret
 	}
 
-	if caches, ok := c.cache[key]; ok {
-		for _, c := range caches {
-			if dnsmessage.IsDuplicate(c.Answer, answer) {
-				c.timer.Reset(time.Until(deadline))
-				c.Deadline = deadline
-				return c
-			}
-		}
-		cache = newDnsCache()
-		c.cache[key] = append(caches, cache)
-		return
-	}
-	cache = newDnsCache()
-	c.cache[key] = []*DnsCache{cache}
-	return
+	return newCache
 }
