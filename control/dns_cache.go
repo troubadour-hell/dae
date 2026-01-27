@@ -6,13 +6,17 @@
 package control
 
 import (
-	"math"
 	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/daeuniverse/dae/common"
 	dnsmessage "github.com/miekg/dns"
+)
+
+const (
+	extendCacheDur = time.Duration(6) * time.Hour
+	minClientTtl   = 5
 )
 
 type DnsCache struct {
@@ -39,20 +43,26 @@ func GetIp(rr dnsmessage.RR) (netip.Addr, bool) {
 	return ip, true
 }
 
-func FillInto(msg *dnsmessage.Msg, cache *DnsCache) bool {
+func FillMsgByCache(msg *dnsmessage.Msg, cache *DnsCache) (originalMsgForExpiredFetch *dnsmessage.Msg) {
 	// Ugly copying RR logic to avoid concurrent read/write TTL.
 	// TODO: Optimize this by byte-level copying?
 	m := &dnsmessage.Msg{}
 	ttls := make([]uint32, 0)
 	ttlDeduction := uint32(time.Since(cache.FetchedAt).Seconds())
 	for _, ans := range cache.Answers {
-		if ans.Header().Ttl > ttlDeduction {
-			ttls = append(ttls, ans.Header().Ttl-ttlDeduction)
-			m.Answer = append(m.Answer, ans)
+		rawTtl := ans.Header().Ttl
+		clientTtl := uint32(0)
+		if rawTtl > ttlDeduction {
+			clientTtl = rawTtl - ttlDeduction
 		}
-	}
-	if len(m.Answer) == 0 {
-		return false
+		if clientTtl < minClientTtl {
+			clientTtl = minClientTtl
+			if originalMsgForExpiredFetch == nil {
+				originalMsgForExpiredFetch = msg.Copy()
+			}
+		}
+		ttls = append(ttls, clientTtl)
+		m.Answer = append(m.Answer, ans)
 	}
 	m = m.Copy()
 	for i := range m.Answer {
@@ -63,7 +73,7 @@ func FillInto(msg *dnsmessage.Msg, cache *DnsCache) bool {
 	msg.Response = true
 	msg.RecursionAvailable = true
 	msg.Truncated = false
-	return true
+	return
 }
 
 func IncludeAnyIpInMsg(msg *dnsmessage.Msg) bool {
@@ -97,34 +107,35 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedT
 		return nil
 	}
 
-	var minTTL uint32 = math.MaxUint32
+	var maxTTL uint32
 	if fixedTtl > 0 {
-		minTTL = uint32(fixedTtl)
+		maxTTL = uint32(fixedTtl)
 		for _, ans := range answers {
 			ans.Header().Ttl = uint32(fixedTtl)
 		}
 	} else {
 		for _, ans := range answers {
-			if ttl := ans.Header().Ttl; ttl < minTTL {
-				minTTL = ttl
+			if ttl := ans.Header().Ttl; ttl > maxTTL {
+				maxTTL = ttl
 			}
 		}
 	}
-	if minTTL == 0 || minTTL == math.MaxUint32 {
+	if maxTTL == 0 {
 		return nil
 	}
 	newCache := &DnsCache{
 		Answers:   answers,
 		FetchedAt: time.Now(),
 	}
-	newCache.timer = time.AfterFunc(time.Duration(minTTL)*time.Second, func() {
-		actual, loaded := c.cache.Load(key)
-		if loaded && actual == newCache {
-			if c.cache.CompareAndDelete(key, newCache) {
-				common.DnsCacheSize.Dec()
+	newCache.timer =
+		time.AfterFunc(time.Duration(maxTTL)*time.Second+extendCacheDur, func() {
+			actual, loaded := c.cache.Load(key)
+			if loaded && actual == newCache {
+				if c.cache.CompareAndDelete(key, newCache) {
+					common.DnsCacheSize.Dec()
+				}
 			}
-		}
-	})
+		})
 
 	oldVal, loaded := c.cache.Swap(key, newCache)
 	if loaded {

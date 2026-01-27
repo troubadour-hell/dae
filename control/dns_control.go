@@ -516,14 +516,21 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 	// Lookup Cache
 	if c.enableCache {
 		if cache := c.dnsCache.Get(cacheKey); cache != nil {
-			if FillInto(msg, cache) {
-				if log.IsLevelEnabled(log.DebugLevel) && len(msg.Question) > 0 {
-					log.WithFields(log.Fields{
-						"answer": msg.Answer,
-					}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
-				}
-				return nil
+			originalMsgForExpiredFetch := FillMsgByCache(msg, cache)
+			if originalMsgForExpiredFetch != nil {
+				go func(m *dnsmessage.Msg) {
+					// Refresh cache asynchronously.
+					if _, err := c.singleFlightForwardDNS(cacheKey, m, upstream, dialArgument); err != nil {
+						log.Warnf("failed to refresh dns cache for %v: %+v", cacheKey.String(), err)
+					}
+				}(originalMsgForExpiredFetch)
 			}
+			if log.IsLevelEnabled(log.DebugLevel) && len(msg.Question) > 0 {
+				log.WithFields(log.Fields{
+					"answer": msg.Answer,
+				}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
+			}
+			return nil
 		}
 	}
 	// Pending for the same lookup.
