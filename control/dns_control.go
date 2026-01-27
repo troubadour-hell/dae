@@ -511,19 +511,22 @@ func (c *DnsController) reject(msg *dnsmessage.Msg) {
 	msg.Truncated = false
 }
 
-func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, dialArgument *dialArgument, queryInfo queryInfo) error {
-	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArgument.Outbound}
+func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo) error {
+	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArg.Outbound}
 	// Lookup Cache
 	if c.enableCache {
 		if cache := c.dnsCache.Get(cacheKey); cache != nil {
 			originalMsgForExpiredFetch := FillMsgByCache(msg, cache)
 			if originalMsgForExpiredFetch != nil {
-				go func(m *dnsmessage.Msg) {
+				// Copy dialArgument by value to avoid SWR UAF (Use-After-Free) as the original dialArgument
+				// comes from a pool and will be recycled when the parent function returns.
+				argCopy := *dialArg
+				go func(m *dnsmessage.Msg, arg dialArgument) {
 					// Refresh cache asynchronously.
-					if _, err := c.singleFlightForwardDNS(cacheKey, m, upstream, dialArgument); err != nil {
+					if _, err := c.singleFlightForwardDNS(cacheKey, m, upstream, &arg); err != nil {
 						log.Warnf("failed to refresh dns cache for %v: %+v", cacheKey.String(), err)
 					}
-				}(originalMsgForExpiredFetch)
+				}(originalMsgForExpiredFetch, argCopy)
 			}
 			if log.IsLevelEnabled(log.DebugLevel) && len(msg.Question) > 0 {
 				log.WithFields(log.Fields{
@@ -534,7 +537,7 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 		}
 	}
 	// Pending for the same lookup.
-	msgResp, err := c.singleFlightForwardDNS(cacheKey, msg, upstream, dialArgument)
+	msgResp, err := c.singleFlightForwardDNS(cacheKey, msg, upstream, dialArg)
 	if err == nil && msgResp != nil && msgResp != msg {
 		// Only copy necessary response fields. Note: the msg.Id may be changing in the first goroutine.
 		msg.Response = true
@@ -615,7 +618,6 @@ func (c *DnsController) singleFlightForwardDNS(
 			}
 			c.UpdateDnsCacheTtl(cacheKey, msg.Answer)
 		}
-
 		return msg, nil
 	})
 	if resp != nil {
