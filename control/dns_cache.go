@@ -129,11 +129,8 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedT
 	}
 	newCache.timer =
 		time.AfterFunc(time.Duration(maxTTL)*time.Second+extendCacheDur, func() {
-			actual, loaded := c.cache.Load(key)
-			if loaded && actual == newCache {
-				if c.cache.CompareAndDelete(key, newCache) {
-					common.DnsCacheSize.Dec()
-				}
+			if c.cache.CompareAndDelete(key, newCache) {
+				common.DnsCacheSize.Dec()
 			}
 		})
 
