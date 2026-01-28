@@ -102,6 +102,15 @@ func (c *commonDnsCache[K]) Get(cacheKey K) *DnsCache {
 	return val.(*DnsCache)
 }
 
+func (c *commonDnsCache[K]) Delete(cacheKey K) bool {
+	if ca, ok := c.cache.LoadAndDelete(cacheKey); ok {
+		ca.(*DnsCache).timer.Stop()
+		common.DnsCacheSize.Dec()
+		return true
+	}
+	return false
+}
+
 func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedTtl int) *DnsCache {
 	if len(answers) == 0 {
 		return nil
