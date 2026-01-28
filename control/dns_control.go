@@ -289,8 +289,7 @@ func (c *DnsController) handleDNSRequest(
 	}
 
 	// Dial and re-route
-	cacheKey := &dnsCacheKey{queryInfo: queryInfo}
-	var fromCache bool
+	var isNew bool
 	var reqMsg *dnsmessage.Msg
 	if !c.routing.HasResponseRules() {
 		reqMsg = dnsMessage
@@ -314,8 +313,7 @@ Dial:
 		}
 
 		// TODO: 这里可能不可以这样做
-		cacheKey.outbound = dialArgument.Outbound
-		fromCache, err = c.dialSend(cacheKey, dnsMessage, upstream, dialArgument, queryInfo)
+		isNew, err = c.dialSend(dnsMessage, upstream, dialArgument, queryInfo)
 		if err != nil {
 			netErr, ok := IsNetError(err)
 			err = oops.
@@ -393,7 +391,7 @@ Dial:
 		return nil
 	}
 
-	if !fromCache {
+	if isNew {
 		if domainBitmap, allZero, shouldUpdate := c.checkDomainBitmap(queryInfo.qname); shouldUpdate {
 			var ttl uint32
 			var ips []netip.Addr
@@ -406,7 +404,7 @@ Dial:
 					ips = append(ips, ip)
 				}
 			}
-			return c.updateLookupCache(cacheKey, domainBitmap, allZero, ips, time.Duration(ttl)*time.Second)
+			return c.updateLookupCache(queryInfo.qname, domainBitmap, allZero, ips, time.Duration(ttl)*time.Second)
 		}
 	}
 	return nil
@@ -456,12 +454,10 @@ func (c *DnsController) checkDomainBitmap(qname string) (domainBitmap [32]uint32
 	return
 }
 
-func (c *DnsController) updateLookupCache(
-	cacheKey *dnsCacheKey, domainBitmap [32]uint32, allZero bool, ips []netip.Addr, ttl time.Duration) error {
-	if len(ips) == 0 || cacheKey == nil {
+func (c *DnsController) updateLookupCache(qname string, domainBitmap [32]uint32, allZero bool, ips []netip.Addr, ttl time.Duration) error {
+	if len(ips) == 0 {
 		return nil
 	}
-	qname := cacheKey.qname
 	lookupTTL := max(ttl, c.minSniffingTtl)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -492,9 +488,6 @@ func (c *DnsController) updateLookupCache(
 			if len(c.deadlineTimers[qname]) == 0 {
 				delete(c.deadlineTimers, qname)
 			}
-			// Also removes the dns cache entry, because lookup cache is only updated
-			// when IP isn't from dns cache.
-			c.dnsCache.Delete(*cacheKey)
 			common.DeadlineTimers.Dec()
 		})
 		common.DeadlineTimers.Inc()
@@ -507,7 +500,7 @@ func (c *DnsController) MaybeUpdateLookupCache(qname string, ips []netip.Addr, t
 		return nil
 	}
 	if domainBitmap, allZero, shouldUpdate := c.checkDomainBitmap(qname); shouldUpdate {
-		return c.updateLookupCache(&dnsCacheKey{queryInfo: queryInfo{qname: qname}}, domainBitmap, allZero, ips, ttl)
+		return c.updateLookupCache(qname, domainBitmap, allZero, ips, ttl)
 	}
 	return nil
 }
@@ -521,33 +514,34 @@ func (c *DnsController) reject(msg *dnsmessage.Msg) {
 	msg.Truncated = false
 }
 
-func (c *DnsController) dialSend(
-	cacheKey *dnsCacheKey, msg *dnsmessage.Msg, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo) (bool, error) {
-	key := *cacheKey
+func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo) (bool, error) {
+	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArg.Outbound}
 	// Lookup Cache
 	if c.enableCache {
-		if cache := c.dnsCache.Get(key); cache != nil {
+		if cache := c.dnsCache.Get(cacheKey); cache != nil {
+			c.dnsCache.Used(cacheKey, cache)
 			originalMsgForExpiredFetch := FillMsgByCache(msg, cache)
 			if originalMsgForExpiredFetch != nil {
 				// Copy dialArgument by value to avoid SWR UAF (Use-After-Free) as the original dialArgument
 				// comes from a pool and will be recycled when the parent function returns.
+				argCopy := *dialArg
 				go func(m *dnsmessage.Msg, arg dialArgument) {
 					// Refresh cache asynchronously.
-					if _, err := c.singleFlightForwardDNS(key, m, upstream, &arg); err != nil {
-						log.Warnf("failed to refresh dns cache for %v: %+v", key, err)
+					if _, err := c.singleFlightForwardDNS(cacheKey, m, upstream, &arg); err != nil {
+						log.Warnf("failed to refresh dns cache for %v: %+v", cacheKey.String(), err)
 					}
-				}(originalMsgForExpiredFetch, *dialArg)
+				}(originalMsgForExpiredFetch, argCopy)
 			}
 			if log.IsLevelEnabled(log.DebugLevel) && len(msg.Question) > 0 {
 				log.WithFields(log.Fields{
 					"answer": msg.Answer,
 				}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
 			}
-			return true, nil
+			return cache.IsNew, nil
 		}
 	}
 	// Pending for the same lookup.
-	msgResp, err := c.singleFlightForwardDNS(key, msg, upstream, dialArg)
+	msgResp, err := c.singleFlightForwardDNS(cacheKey, msg, upstream, dialArg)
 	if err == nil && msgResp != nil && msgResp != msg {
 		// Only copy necessary response fields. Note: the msg.Id may be changing in the first goroutine.
 		msg.Response = true
@@ -561,7 +555,7 @@ func (c *DnsController) dialSend(
 		msg.Ns = msgResp.Ns
 		msg.Extra = msgResp.Extra
 	}
-	return false, err
+	return true, err
 }
 
 func (c *DnsController) singleFlightForwardDNS(
