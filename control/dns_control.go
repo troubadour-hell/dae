@@ -520,7 +520,6 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 	// Lookup Cache
 	if c.enableCache {
 		if cache := c.dnsCache.Get(cacheKey); cache != nil {
-			c.dnsCache.Used(cacheKey, cache)
 			originalMsgForExpiredFetch := FillMsgByCache(msg, cache)
 			if originalMsgForExpiredFetch != nil {
 				// Copy dialArgument by value to avoid SWR UAF (Use-After-Free) as the original dialArgument

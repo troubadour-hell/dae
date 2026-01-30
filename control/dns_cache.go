@@ -100,17 +100,14 @@ func (c *commonDnsCache[K]) Get(cacheKey K) *DnsCache {
 	if !ok {
 		return nil
 	}
-	return val.(*DnsCache)
-}
-
-func (c *commonDnsCache[K]) Used(cacheKey K, cache *DnsCache) bool {
-	if !cache.IsNew {
-		return false
+	cache := val.(*DnsCache)
+	if cache.IsNew {
+		// Keep DnsCache instance as immutable, so make a copy and modify.
+		copied := *cache
+		copied.IsNew = false
+		c.cache.CompareAndSwap(cacheKey, cache, &copied)
 	}
-	// Keep DnsCache instance as immutable, so make a copy and modify.
-	copied := *cache
-	copied.IsNew = false
-	return c.cache.CompareAndSwap(cacheKey, cache, &copied)
+	return cache
 }
 
 func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedTtl int) *DnsCache {
