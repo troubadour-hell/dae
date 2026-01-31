@@ -83,7 +83,6 @@ type DnsController struct {
 	sniffVerifyMode consts.SniffVerifyMode
 
 	singleFlightGroup singleflight.Group
-	dialArgumentPool  sync.Pool
 }
 
 func parseIpVersionPreference(prefer int) (uint16, error) {
@@ -122,8 +121,6 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		dnsForwarderCache: sync.Map{},
 		dnsCache:          newCommonDnsCache[dnsCacheKey](),
 		deadlineTimers:    make(map[string]map[netip.Addr]*time.Timer),
-
-		dialArgumentPool: sync.Pool{New: func() any { return &dialArgument{} }},
 	}, nil
 }
 
@@ -296,8 +293,7 @@ func (c *DnsController) handleDNSRequest(
 	} else {
 		reqMsg = dnsMessage.Copy()
 	}
-	dialArgument := c.dialArgumentPool.Get().(*dialArgument)
-	defer c.dialArgumentPool.Put(dialArgument)
+	dialArgument := dialArgument{}
 Dial:
 	for invokingDepth := 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
 		if log.IsLevelEnabled(log.DebugLevel) {
@@ -308,12 +304,12 @@ Dial:
 		}
 
 		// Select best dial arguments (outbound, dialer, l4proto, ipversion, etc.)
-		if err := c.bestDialerChooser(req, upstream, dialArgument); err != nil {
+		if err := c.bestDialerChooser(req, upstream, &dialArgument); err != nil {
 			return err
 		}
 
 		// TODO: 这里可能不可以这样做
-		isNew, err = c.dialSend(dnsMessage, upstream, dialArgument, queryInfo)
+		isNew, err = c.dialSend(dnsMessage, upstream, &dialArgument, queryInfo)
 		if err != nil {
 			netErr, ok := IsNetError(err)
 			err = oops.
@@ -349,7 +345,7 @@ Dial:
 			return err
 		}
 		if ResponseIndex.IsReserved() {
-			c.logDnsResponse(req, dialArgument, queryInfo, ResponseIndex == consts.DnsResponseOutboundIndex_Accept)
+			c.logDnsResponse(req, &dialArgument, queryInfo, ResponseIndex == consts.DnsResponseOutboundIndex_Accept)
 			switch ResponseIndex {
 			case consts.DnsResponseOutboundIndex_Reject:
 				// Reject

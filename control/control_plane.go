@@ -98,7 +98,6 @@ type ControlPlane struct {
 	PrometheusRegistry *prometheus.Registry
 
 	outboundRedirects     map[consts.OutboundIndex]consts.OutboundIndex
-	dialOptionPool        sync.Pool
 	dnsRouteCache         *CacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex]
 	dnsRoutingResultCache *CacheWithTTL[netip.Addr, *bpfRoutingResult]
 }
@@ -255,11 +254,12 @@ func NewControlPlane(
 
 	/// Init DialerGroups.
 	var noConnectivityOutbound consts.OutboundIndex
-	if global.NoConnectivityBehavior == "direct" {
+	switch global.NoConnectivityBehavior {
+	case "direct":
 		noConnectivityOutbound = consts.OutboundDirect
-	} else if global.NoConnectivityBehavior == "block" {
+	case "block":
 		noConnectivityOutbound = consts.OutboundBlock
-	} else {
+	default:
 		return nil, oops.Errorf("invalid no_connectivity_behavior: %v", global.NoConnectivityBehavior)
 	}
 
@@ -428,12 +428,7 @@ func NewControlPlane(
 		trafficLogger:          trafficLogger,
 		PrometheusRegistry:     prometheusRegistry,
 		outboundRedirects:      outboundRedirects,
-		dialOptionPool: sync.Pool{
-			New: func() any {
-				return &DialOption{}
-			},
-		},
-		dnsRouteCache: NewCacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, nil),
+		dnsRouteCache:          NewCacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, nil),
 		dnsRoutingResultCache: NewCacheWithTTL(1*time.Hour, func(_ netip.Addr, v *bpfRoutingResult) {
 			core.RecycleRoutingResult(v)
 		}),
@@ -903,12 +898,6 @@ func getVmRSS() (int64, error) {
 	return 0, oops.Errorf("VmRSS not found in /proc/self/status")
 }
 
-type udpJob struct {
-	src  netip.AddrPort
-	oob  []byte
-	data []byte
-}
-
 func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err error) {
 	sentReady := false
 	defer func() {
@@ -990,19 +979,6 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 		}
 	}()
 
-	var dnsRequestPool sync.Pool
-	dnsRequestPool.New = func() any {
-		return &dnsRequest{}
-	}
-
-	newDnsRequest := func(src, dst netip.AddrPort, routingResult *bpfRoutingResult) *dnsRequest {
-		req := dnsRequestPool.Get().(*dnsRequest)
-		req.src = src
-		req.dst = dst
-		req.routingResult = routingResult
-		return req
-	}
-
 	go func() {
 		for {
 			buf := pool.GetBuffer(consts.EthernetMtu)
@@ -1039,9 +1015,11 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 					if routingResult.Must == 0 {
 						var dnsMessage dnsmessage.Msg
 						if err := dnsMessage.Unpack(data); err == nil {
-							dnsReq := newDnsRequest(src, dst, routingResult)
-							c.dnsController.Handle(&dnsMessage, dnsReq)
-							dnsRequestPool.Put(dnsReq)
+							c.dnsController.Handle(&dnsMessage, &dnsRequest{
+								src:           src,
+								dst:           dst,
+								routingResult: routingResult,
+							})
 							pool.PutBuffer(data)
 							return
 						}
