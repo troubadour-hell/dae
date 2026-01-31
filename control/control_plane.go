@@ -1127,7 +1127,7 @@ func (c *ControlPlane) chooseBestDnsDialer(
 			return oops.Errorf("unexpected ipversion: %v", ver)
 		}
 		var outboundIndex consts.OutboundIndex
-		hasCache := true
+		hasCache := false
 		if routeKey != nil {
 			outboundIndex, hasCache = c.dnsRouteCache.Get(*routeKey)
 		}
