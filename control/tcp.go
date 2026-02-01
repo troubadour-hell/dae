@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/sniffing"
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
@@ -78,12 +80,17 @@ func (c *ControlPlane) handleTcpDns(
 		routingResult: routingResult,
 		isTcp:         true,
 	}
+	id := msg.Id
+	// Avoids duplicated id from clients, so make the id unique.
+	msg.Id = uint16(fastrand.Intn(math.MaxUint16))
 	queryInfo := c.dnsController.prepareQueryInfo(msg)
 	if err = c.dnsController.handleDNSRequest(msg, req, queryInfo); err != nil {
 		log.Errorf("Failed to handle tcp dns request: %v", err)
 		msg.Response = true
 		msg.SetRcode(msg, dnsmessage.RcodeServerFailure)
 	}
+	// Keep the id the same with request.
+	msg.Id = id
 	if err = writeDnsMsg(msg, lConn); err != nil {
 		return oops.Wrapf(err, "failed to write tcp dns response")
 	}
