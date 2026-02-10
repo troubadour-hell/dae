@@ -1,0 +1,29 @@
+#      _
+#   __| | __ _  ___
+#  / _` |/ _` |/ _ \
+# | (_| | (_| |  __/
+#  \__,_|\__,_|\___|
+#
+# Copyright (C) 2023 @daeuniverse <https://github.com/daeuniverse>
+#
+# This is a open-source software, liscensed under the AGPL-3.0 License.
+# See /License for more information.
+
+name: Manual Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        type: string
+        description: "Branch to build from (e.g. main, next, feature/xxx)"
+        required: true
+        default: "main"
+
+jobs:
+  build:
+    uses: ./.github/workflows/seed-build.yml
+    with:
+      ref: ${{ github.event.inputs.branch }}
+      build-type: main-build
+    secrets: inherit
