@@ -198,8 +198,8 @@ func ParseVlessURL(vless string) (data *Vless, err error) {
 	if data.Net == "" {
 		data.Net = "tcp"
 	}
-	if data.Net == "grpc" && data.ServiceName == "" {
-		data.ServiceName = u.Query().Get("serviceName")
+	if data.Net == "grpc" && data.Path == "" {
+		data.Path = data.ServiceName
 	}
 	if data.Type == "" {
 		data.Type = "none"
