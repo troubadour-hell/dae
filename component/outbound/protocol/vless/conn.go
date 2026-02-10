@@ -151,8 +151,8 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 
 func (c *Conn) read(b []byte) (n int, err error) {
 	c.onceRead.Do(func() {
-		c.readErr = c.sendHeaderOnce()
-		if c.readErr != nil {
+		if err := c.sendHeaderOnce(); err != nil {
+			c.readErr = fmt.Errorf("failed to send header: %w", err)
 			return
 		}
 		c.readErr = c.readRespHeader()
