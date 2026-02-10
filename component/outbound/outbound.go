@@ -30,4 +30,7 @@ import (
 	// _ "github.com/daeuniverse/outbound/protocol/vless"
 	// _ "github.com/daeuniverse/outbound/protocol/vmess"
 	_ "github.com/daeuniverse/outbound/transport/ws"
+
+	_ "github.com/daeuniverse/dae/component/outbound/dialer/vless"
+	_ "github.com/daeuniverse/dae/component/outbound/protocol/vless"
 )
