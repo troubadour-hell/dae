@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -38,18 +37,24 @@ func NewConn(conn net.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err erro
 		metadata: metadata,
 		cmdKey:   key,
 	}
-	if metadata.Network == "tcp" {
-		time.AfterFunc(100*time.Millisecond, func() {
-			// avoid the situation where the server sends messages first
-			if _, err = c.Write(nil); err != nil {
-				return
-			}
-		})
-	}
 	if metadata.Flow != "" {
 		c.addonsBytes = marshalAddons(metadata.Flow)
 	}
 	return c, nil
+}
+
+// sendHeaderOnce ensures the VLESS request header is sent exactly once.
+// This is needed for the "server sends first" case where Read is called
+// before any Write.
+func (c *Conn) sendHeaderOnce() error {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
+	if !c.onceWrite {
+		if _, err := c.write(nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // marshalAddons manually encodes the Addons protobuf message.
@@ -146,6 +151,10 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 
 func (c *Conn) read(b []byte) (n int, err error) {
 	c.onceRead.Do(func() {
+		c.readErr = c.sendHeaderOnce()
+		if c.readErr != nil {
+			return
+		}
 		c.readErr = c.readRespHeader()
 	})
 	if c.readErr != nil {
